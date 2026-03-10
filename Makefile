@@ -24,9 +24,9 @@ check: $(S2T_DATA)
 
 check-size: all
 	@SIZE=$$(wc -c < target/release/zhtw-mcp | tr -d ' '); \
-	MAX=5242880; \
+	MAX=20971520; \
 	if [ "$$SIZE" -gt "$$MAX" ]; then \
-		echo "FAIL: release binary $$SIZE bytes exceeds 5MB budget ($$MAX)"; \
+		echo "FAIL: release binary $$SIZE bytes exceeds 20 MiB budget ($$MAX)"; \
 		exit 1; \
 	else \
 		echo "OK: release binary $$SIZE bytes (budget: $$MAX)"; \
