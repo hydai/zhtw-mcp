@@ -1,0 +1,52 @@
+[package]
+name = "zhtw-mcp"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.91"
+description = "MCP server for Traditional Chinese (zh-TW) text linting and normalization"
+license = "MIT"
+repository = "https://github.com/aspect-build/zhtw-mcp"
+homepage = "https://github.com/aspect-build/zhtw-mcp"
+categories = ["command-line-utilities", "text-processing", "internationalization"]
+keywords = ["mcp", "chinese", "linting", "traditional-chinese", "zh-tw"]
+readme = "README.md"
+include = ["src/**/*", "assets/ruleset.json", "Cargo.toml", "LICENSE", "README.md", "rust-toolchain.toml"]
+
+[features]
+default = ["translate"]
+async-transport = ["dep:tokio"]
+translate = ["dep:ureq", "dep:urlencoding", "dep:sled", "dep:postcard"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+aho-corasick = "1"
+daachorse = "1"
+regex = "1"
+sha2 = "0.10"
+anyhow = "1"
+unicode-normalization = "0.1"
+pulldown-cmark = { version = "0.12", default-features = false }
+log = "0.4"
+env_logger = { version = "0.11", default-features = false }
+dirs = "5.0"
+tempfile = "3.0"
+toml = "0.8"
+tokio = { version = "1", features = ["rt", "io-util", "time", "sync", "macros", "io-std"], optional = true }
+ureq = { version = "3", optional = true }
+urlencoding = { version = "2", optional = true }
+sled = { version = "0.34", optional = true }
+postcard = { version = "1", features = ["alloc"], optional = true }
+rustc-hash = "2.1.1"
+fs2 = "0.4"
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false }
+
+[[bench]]
+name = "scanner"
+harness = false
+
+[profile.release]
+lto = true
+strip = true

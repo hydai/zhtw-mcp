@@ -1,0 +1,135 @@
+// Baseline mode for incremental adoption.
+//
+// Issue fingerprints: hash(rule_id + file + normalized context).
+// --update-baseline writes the baseline; --baseline reads and filters.
+
+use std::collections::HashSet;
+use std::path::Path;
+
+use sha2::{Digest, Sha256};
+
+use crate::rules::ruleset::Issue;
+
+/// A baseline file is a JSON array of fingerprint strings.
+#[derive(Debug, Default)]
+pub struct Baseline {
+    fingerprints: HashSet<String>,
+}
+
+impl Baseline {
+    /// Load a baseline from a JSON file. Returns empty baseline if file
+    /// does not exist.
+    pub fn load(path: &Path) -> anyhow::Result<Self> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let content = std::fs::read_to_string(path)?;
+        let fps: Vec<String> = serde_json::from_str(&content)?;
+        Ok(Self {
+            fingerprints: fps.into_iter().collect(),
+        })
+    }
+
+    /// Save baseline to a JSON file.
+    pub fn save(&self, path: &Path) -> anyhow::Result<()> {
+        let mut fps: Vec<&String> = self.fingerprints.iter().collect();
+        fps.sort();
+        let json = serde_json::to_string_pretty(&fps)?;
+        std::fs::write(path, json)?;
+        Ok(())
+    }
+
+    /// Check if an issue is in the baseline.
+    pub fn contains(&self, file: &str, issue: &Issue) -> bool {
+        let fp = fingerprint(file, issue);
+        self.fingerprints.contains(&fp)
+    }
+
+    /// Add an issue fingerprint to the baseline.
+    pub fn insert(&mut self, file: &str, issue: &Issue) {
+        let fp = fingerprint(file, issue);
+        self.fingerprints.insert(fp);
+    }
+
+    pub fn len(&self) -> usize {
+        self.fingerprints.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.fingerprints.is_empty()
+    }
+}
+
+/// Compute a stable fingerprint for an issue.
+///
+/// Hash of: rule_type + found text + file path.
+/// This is intentionally position-independent so edits that shift line
+/// numbers don't invalidate the baseline.
+fn fingerprint(file: &str, issue: &Issue) -> String {
+    let mut hasher = Sha256::new();
+    let rule_str = serde_json::to_string(&issue.rule_type).unwrap_or_default();
+    hasher.update(rule_str.as_bytes());
+    hasher.update(b"|");
+    hasher.update(issue.found.as_bytes());
+    hasher.update(b"|");
+    hasher.update(file.as_bytes());
+    let hash = hasher.finalize();
+    format!("{hash:x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rules::ruleset::{IssueType, Severity};
+
+    fn make_issue(found: &str) -> Issue {
+        let mut issue = Issue::new(
+            0,
+            found.len(),
+            found,
+            vec!["fix".to_string()],
+            IssueType::CrossStrait,
+            Severity::Warning,
+        );
+        issue.line = 1;
+        issue.col = 1;
+        issue
+    }
+
+    #[test]
+    fn fingerprint_is_stable() {
+        let issue = make_issue("軟件");
+        let fp1 = fingerprint("test.md", &issue);
+        let fp2 = fingerprint("test.md", &issue);
+        assert_eq!(fp1, fp2);
+    }
+
+    #[test]
+    fn fingerprint_differs_by_file() {
+        let issue = make_issue("軟件");
+        let fp1 = fingerprint("a.md", &issue);
+        let fp2 = fingerprint("b.md", &issue);
+        assert_ne!(fp1, fp2);
+    }
+
+    #[test]
+    fn baseline_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("baseline.json");
+
+        let mut bl = Baseline::default();
+        let issue = make_issue("軟件");
+        bl.insert("test.md", &issue);
+        bl.save(&path).unwrap();
+
+        let loaded = Baseline::load(&path).unwrap();
+        assert!(loaded.contains("test.md", &issue));
+        assert!(!loaded.contains("other.md", &issue));
+    }
+
+    #[test]
+    fn baseline_load_missing_file() {
+        let bl = Baseline::load(Path::new("/nonexistent/baseline.json")).unwrap();
+        assert_eq!(bl.len(), 0);
+    }
+}

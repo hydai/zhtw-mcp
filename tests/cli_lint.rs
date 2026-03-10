@@ -1,0 +1,521 @@
+// Integration tests for the CLI `lint` subcommand.
+//
+// Tests exit codes, output formats, profile selection, content-type handling,
+// max-errors gating, max-warnings gating, and multi-file/directory linting.
+
+use std::io::Write;
+use std::process::{Command, Output, Stdio};
+
+fn binary_path() -> std::path::PathBuf {
+    let mut path = std::env::current_exe().unwrap();
+    path.pop();
+    if path.ends_with("deps") {
+        path.pop();
+    }
+    path.push("zhtw-mcp");
+    path
+}
+
+fn run_lint_stdin(extra_args: &[&str], input: &str) -> Output {
+    let bin = binary_path();
+    Command::new(&bin)
+        .args(["lint", "--"])
+        .args(extra_args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(input.as_bytes())
+                .unwrap();
+            child.wait_with_output()
+        })
+        .unwrap()
+}
+
+#[test]
+fn cli_lint_human_format_exit_0_clean() {
+    let output = run_lint_stdin(&[], "正確的軟體");
+    assert!(output.status.success(), "clean text should exit 0");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("No issues found"), "should say no issues");
+}
+
+#[test]
+fn cli_lint_human_format_warnings_exit_0() {
+    // Cross-strait terms are Warning severity; default --max-errors 0 only
+    // gates on Error-severity issues, so warnings-only text exits 0.
+    let output = run_lint_stdin(&[], "這個軟件很好用");
+    assert!(output.status.success(), "warnings-only should exit 0");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("軟件"), "should mention the issue");
+    assert!(stderr.contains("issue(s) found"), "should show count");
+}
+
+#[test]
+fn cli_lint_json_format() {
+    let output = run_lint_stdin(&["--format", "json"], "這個軟件很好用");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON output");
+    assert!(parsed["total"].as_u64().unwrap() > 0);
+    assert!(!parsed["issues"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn cli_lint_profile_strict_moe() {
+    // 裏 is a variant only flagged under strict_moe
+    let output = run_lint_stdin(&["--format", "json", "--profile", "strict_moe"], "裏面");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let issues = parsed["issues"].as_array().unwrap();
+    assert!(
+        issues.iter().any(|i| i["found"] == "裏"),
+        "strict_moe should flag 裏 variant"
+    );
+}
+
+#[test]
+fn cli_lint_max_errors_gate() {
+    // With --max-errors 100, even dirty text should exit 0 (below threshold)
+    let output = run_lint_stdin(&["--max-errors", "100"], "這個軟件很好用");
+    assert!(
+        output.status.success(),
+        "should exit 0 when errors <= max_errors"
+    );
+}
+
+#[test]
+fn cli_lint_content_type_markdown() {
+    // 軟件 in code block should be excluded, 軟件 in prose should be flagged
+    let output = run_lint_stdin(
+        &["--format", "json", "--content-type", "markdown"],
+        "正確文本\n\n```\n軟件 in code\n```\n\n這個軟件有問題",
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let issues = parsed["issues"].as_array().unwrap();
+    let software_issues: Vec<_> = issues.iter().filter(|i| i["found"] == "軟件").collect();
+    assert_eq!(
+        software_issues.len(),
+        1,
+        "markdown mode should exclude 軟件 in code block"
+    );
+}
+
+#[test]
+fn cli_lint_content_type_plain_overrides_md_extension() {
+    // When --content-type plain is explicit, even .md content is treated as plain text
+    let dir = tempfile::tempdir().unwrap();
+    let md_file = dir.path().join("test.md");
+    std::fs::write(&md_file, "```\n軟件\n```\n").unwrap();
+
+    let bin = binary_path();
+    let output = Command::new(&bin)
+        .args([
+            "lint",
+            md_file.to_str().unwrap(),
+            "--format",
+            "json",
+            "--content-type",
+            "plain",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    // In plain mode, backtick exclusion still applies, so 軟件 in triple-backtick
+    // block is excluded by the regex-based backtick patterns.
+    // The test verifies --content-type plain is accepted and doesn't crash.
+    assert!(parsed.get("issues").is_some());
+}
+
+// -- max_warnings tests (TODO 14.5) ----------------------------------------
+
+#[test]
+fn cli_lint_max_warnings_gate_exit_1_when_exceeded() {
+    // Cross-strait terms emit Warning severity. With --max-warnings 0, even one
+    // warning should cause exit 1.
+    let output = run_lint_stdin(&["--max-warnings", "0"], "這個軟件很好用");
+    assert!(
+        !output.status.success(),
+        "should exit 1 when warnings exceed --max-warnings 0"
+    );
+}
+
+#[test]
+fn cli_lint_max_warnings_gate_exit_0_when_within_limit() {
+    // With --max-warnings 100, one warning should exit 0.
+    let output = run_lint_stdin(&["--max-warnings", "100"], "這個軟件很好用");
+    assert!(
+        output.status.success(),
+        "should exit 0 when warnings <= --max-warnings 100"
+    );
+}
+
+#[test]
+fn cli_lint_max_warnings_and_max_errors_both_checked() {
+    // Both thresholds must pass for exit 0.
+    // "軟件" emits 1 warning. With --max-errors 100 --max-warnings 0 → exit 1.
+    let output = run_lint_stdin(
+        &["--max-errors", "100", "--max-warnings", "0"],
+        "這個軟件很好用",
+    );
+    assert!(
+        !output.status.success(),
+        "should exit 1 when warnings gate fails even if errors gate passes"
+    );
+}
+
+#[test]
+fn cli_lint_md_file_auto_detects_markdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let md_file = dir.path().join("test.md");
+    std::fs::write(&md_file, "正確\n\n```\n軟件\n```\n\n這個軟件不好").unwrap();
+
+    let bin = binary_path();
+    let output = Command::new(&bin)
+        .args(["lint", md_file.to_str().unwrap(), "--format", "json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let issues = parsed["issues"].as_array().unwrap();
+    let sw: Vec<_> = issues.iter().filter(|i| i["found"] == "軟件").collect();
+    assert_eq!(sw.len(), 1, ".md auto-detection should exclude code block");
+}
+
+// -- Multi-file / directory linting tests (19.4) ----------------------------
+
+fn run_lint_args(args: &[&str]) -> Output {
+    let bin = binary_path();
+    Command::new(&bin)
+        .arg("lint")
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn cli_lint_directory_recursive() {
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(dir.path().join("a.md"), "這個軟件").unwrap();
+    std::fs::write(sub.join("b.txt"), "這個軟件").unwrap();
+
+    let output = run_lint_args(&[dir.path().to_str().unwrap(), "--format", "json"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let arr = parsed.as_array().expect("multi-file JSON is array");
+    assert_eq!(arr.len(), 2, "should find 2 files recursively");
+}
+
+#[test]
+fn cli_lint_directory_skips_hidden() {
+    let dir = tempfile::tempdir().unwrap();
+    let hidden = dir.path().join(".hidden");
+    std::fs::create_dir(&hidden).unwrap();
+    std::fs::write(hidden.join("file.md"), "這個軟件").unwrap();
+    std::fs::write(dir.path().join("visible.md"), "正確的軟體").unwrap();
+
+    let output = run_lint_args(&[dir.path().to_str().unwrap(), "--format", "json"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    // Only the visible file should be found (single file = object, not array).
+    assert!(
+        parsed.get("file").is_some(),
+        "should find only 1 file (hidden skipped)"
+    );
+}
+
+#[test]
+fn cli_lint_directory_exclude_pattern() {
+    let dir = tempfile::tempdir().unwrap();
+    let vendor = dir.path().join("vendor");
+    std::fs::create_dir(&vendor).unwrap();
+    std::fs::write(vendor.join("lib.md"), "這個軟件").unwrap();
+    std::fs::write(dir.path().join("main.md"), "這個軟件").unwrap();
+
+    let output = run_lint_args(&[
+        dir.path().to_str().unwrap(),
+        "--format",
+        "json",
+        "--exclude",
+        "vendor/**",
+    ]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    // Only main.md should survive (single file = object).
+    assert!(
+        parsed.get("file").is_some(),
+        "should find only 1 file (vendor excluded)"
+    );
+}
+
+#[test]
+fn cli_lint_directory_deterministic_order() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("z.md"), "軟件").unwrap();
+    std::fs::write(dir.path().join("a.md"), "軟件").unwrap();
+    std::fs::write(dir.path().join("m.md"), "軟件").unwrap();
+
+    let output = run_lint_args(&[dir.path().to_str().unwrap(), "--format", "json"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let arr = parsed.as_array().expect("multi-file JSON is array");
+    let files: Vec<&str> = arr.iter().filter_map(|v| v["file"].as_str()).collect();
+    assert_eq!(files.len(), 3);
+    // Files should be sorted lexicographically (canonical paths).
+    let mut sorted = files.clone();
+    sorted.sort();
+    assert_eq!(
+        files, sorted,
+        "output must be in deterministic sorted order"
+    );
+}
+
+#[test]
+fn cli_lint_directory_aggregate_exit_code() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.md"), "軟件").unwrap();
+    std::fs::write(dir.path().join("b.md"), "軟件").unwrap();
+
+    // With --max-warnings 0, any warning fails.
+    let output = run_lint_args(&[dir.path().to_str().unwrap(), "--max-warnings", "0"]);
+    assert!(
+        !output.status.success(),
+        "aggregate warnings should cause exit 1"
+    );
+}
+
+#[test]
+fn cli_lint_directory_only_supported_extensions() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("code.rs"), "這個軟件").unwrap();
+    std::fs::write(dir.path().join("data.json"), "這個軟件").unwrap();
+    std::fs::write(dir.path().join("doc.md"), "正確").unwrap();
+
+    let output = run_lint_args(&[dir.path().to_str().unwrap(), "--format", "json"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    // Only doc.md should be found.
+    assert!(
+        parsed.get("file").is_some(),
+        "should only scan supported extensions"
+    );
+}
+
+#[test]
+fn cli_lint_multiple_file_args() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.md"), "軟件").unwrap();
+    std::fs::write(dir.path().join("b.md"), "軟件").unwrap();
+
+    let a = dir.path().join("a.md");
+    let b = dir.path().join("b.md");
+    let output = run_lint_args(&[a.to_str().unwrap(), b.to_str().unwrap(), "--format", "json"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let arr = parsed.as_array().expect("multi-file JSON is array");
+    assert_eq!(arr.len(), 2, "two file args should produce two results");
+}
+
+#[test]
+fn cli_lint_config_file_applied() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("test.md"), "軟件").unwrap();
+    // Config sets max_warnings=0, so even one warning should fail.
+    std::fs::write(dir.path().join(".zhtw-mcp.toml"), "max_warnings = 0\n").unwrap();
+
+    let bin = binary_path();
+    let output = Command::new(&bin)
+        .current_dir(dir.path())
+        .args(["lint", "test.md"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "config max_warnings=0 should cause exit 1"
+    );
+}
+
+#[test]
+fn cli_lint_config_cli_overrides_config() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("test.md"), "軟件").unwrap();
+    // Config sets max_warnings=0, but CLI overrides with max_warnings=100.
+    std::fs::write(dir.path().join(".zhtw-mcp.toml"), "max_warnings = 0\n").unwrap();
+
+    let bin = binary_path();
+    let output = Command::new(&bin)
+        .current_dir(dir.path())
+        .args(["lint", "test.md", "--max-warnings", "100"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "CLI --max-warnings should override config"
+    );
+}
+
+#[test]
+fn cli_lint_fix_rewrites_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("test.md");
+    std::fs::write(&file, "這個軟件很好用").unwrap();
+
+    let output = run_lint_args(&[file.to_str().unwrap(), "--fix"]);
+    assert!(output.status.success(), "fix should exit 0");
+    let content = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        content.contains("軟體"),
+        "file should be rewritten with fix: {content}"
+    );
+    assert!(
+        !content.contains("軟件"),
+        "original term should be gone: {content}"
+    );
+}
+
+#[test]
+fn cli_lint_fix_dry_run_no_rewrite() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("test.md");
+    std::fs::write(&file, "這個軟件很好用").unwrap();
+
+    let output = run_lint_args(&[file.to_str().unwrap(), "--fix", "--dry-run"]);
+    let content = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        content.contains("軟件"),
+        "dry run should NOT rewrite: {content}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("dry run"), "should mention dry run");
+}
+
+#[test]
+fn cli_lint_fix_stdin_to_stdout() {
+    let output = run_lint_stdin(&["--fix"], "這個軟件很好用");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("軟體"),
+        "stdout should contain fixed text: {stdout}"
+    );
+}
+
+#[test]
+fn cli_lint_fix_round_trip() {
+    // Fix, then re-lint: should find 0 fixable issues.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("test.md");
+    std::fs::write(&file, "這個軟件的內存很大").unwrap();
+
+    run_lint_args(&[file.to_str().unwrap(), "--fix"]);
+
+    // Re-lint in JSON to check issues.
+    let output = run_lint_args(&[file.to_str().unwrap(), "--format", "json"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let total = parsed["total"].as_u64().unwrap_or(0);
+    assert_eq!(total, 0, "re-lint after fix should find 0 issues");
+}
+
+#[test]
+fn cli_lint_sarif_output() {
+    let output = run_lint_stdin(&["--format", "sarif"], "這個軟件很好用");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid SARIF JSON");
+    assert_eq!(parsed["version"], "2.1.0");
+    let runs = parsed["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 1);
+    let results = runs[0]["results"].as_array().unwrap();
+    assert!(!results.is_empty(), "should have SARIF results");
+    assert!(
+        results[0]["ruleId"]
+            .as_str()
+            .unwrap()
+            .starts_with("zhtw-mcp/"),
+        "ruleId should be namespaced"
+    );
+    assert!(
+        results[0]["locations"][0]["physicalLocation"]["region"]["startLine"]
+            .as_u64()
+            .is_some(),
+        "should have line number"
+    );
+}
+
+#[test]
+fn cli_lint_explain_shows_context() {
+    let output = run_lint_stdin(&["--explain"], "這個軟件很好用");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("english:") || stderr.contains("context:"),
+        "explain should show context/english fields"
+    );
+}
+
+#[test]
+fn cli_lint_baseline_update_and_filter() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("test.md");
+    let baseline = dir.path().join("baseline.json");
+    std::fs::write(&file, "這個軟件很好用").unwrap();
+
+    // Step 1: Generate baseline.
+    let output = run_lint_args(&[
+        file.to_str().unwrap(),
+        "--baseline",
+        baseline.to_str().unwrap(),
+        "--update-baseline",
+    ]);
+    assert!(output.status.success());
+    assert!(baseline.exists(), "baseline file should be created");
+
+    // Step 2: Lint with baseline - issues should be suppressed.
+    let output = run_lint_args(&[
+        file.to_str().unwrap(),
+        "--baseline",
+        baseline.to_str().unwrap(),
+        "--max-warnings",
+        "0",
+    ]);
+    assert!(
+        output.status.success(),
+        "baselined issues should not count against max-warnings"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("baseline") || stderr.contains("suppressed"),
+        "should mention baseline suppression"
+    );
+}
+
+#[test]
+fn cli_lint_human_format_multi_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.md"), "軟件").unwrap();
+    std::fs::write(dir.path().join("b.md"), "正確").unwrap();
+
+    let output = run_lint_args(&[dir.path().to_str().unwrap()]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Multi-file human format prefixes each line with the filename.
+    assert!(
+        stderr.contains("a.md:") || stderr.contains("/a.md:"),
+        "multi-file human format should include filename prefix"
+    );
+}

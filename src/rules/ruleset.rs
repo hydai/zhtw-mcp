@@ -1,0 +1,465 @@
+use serde::{Deserialize, Serialize};
+
+/// Linting profile that controls which rules are active and how strict they are.
+///
+/// Default is the baseline (current behavior). StrictMoe enables the full
+/// Ministry of Education standard (variants, colon, 臺). UiStrings is
+/// relaxed for software UI contexts (half-width : allowed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Profile {
+    Default,
+    StrictMoe,
+    UiStrings,
+}
+
+/// Processing chain configuration for a profile.
+///
+/// Each profile is a combination of enabled rule stages rather than a
+/// subset of rules. More specific profiles (strict_moe) add extra stages;
+/// they do not replace earlier ones.
+#[derive(Debug, Clone, Copy)]
+pub struct ProfileConfig {
+    /// Enable spelling rules (cross-strait, political, typo, confusable).
+    pub spelling: bool,
+    /// Enable case rules (proper noun casing).
+    pub casing: bool,
+    /// Enable basic punctuation: comma, period, !, ?, ;, (, ).
+    pub basic_punctuation: bool,
+    /// Enable full-width colon enforcement (: -> ：).
+    pub colon_enforcement: bool,
+    /// Enable enumeration comma (dunhao) detection.
+    pub dunhao_detection: bool,
+    /// Enable range indicator normalization (~, -).
+    pub range_normalization: bool,
+    /// Enable character variant normalization (裏->裡, 綫->線).
+    pub variant_normalization: bool,
+    /// Enable ellipsis normalization: ... → ……, 。。。 → …….
+    pub ellipsis_normalization: bool,
+    /// Range indicator style: true = en dash (–), false = wave dash (～).
+    pub range_en_dash: bool,
+    /// Political stance sub-profile. Controls which PoliticalColoring rules fire.
+    pub political_stance: PoliticalStance,
+}
+
+impl ProfileConfig {
+    /// Return a copy with the political stance overridden.
+    pub fn with_stance(mut self, stance: PoliticalStance) -> Self {
+        self.political_stance = stance;
+        self
+    }
+}
+
+impl Profile {
+    /// All defined profiles.
+    pub const ALL: &'static [Profile] = &[Profile::Default, Profile::StrictMoe, Profile::UiStrings];
+
+    /// Human-readable name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Profile::Default => "default",
+            Profile::StrictMoe => "strict_moe",
+            Profile::UiStrings => "ui_strings",
+        }
+    }
+
+    /// Short description.
+    pub fn description(self) -> &'static str {
+        match self {
+            Profile::Default => "Base zh-TW rules: cross-strait vocabulary, political coloring, casing, basic punctuation",
+            Profile::StrictMoe => "Full MoE enforcement: all punctuation, character variants, 臺 normalization",
+            Profile::UiStrings => "Relaxed for software UI: half-width colon allowed, en dash for ranges, strict vocabulary",
+        }
+    }
+
+    /// Processing chain stages enabled by this profile.
+    pub fn config(self) -> ProfileConfig {
+        match self {
+            Profile::Default => ProfileConfig {
+                spelling: true,
+                casing: true,
+                basic_punctuation: true,
+                colon_enforcement: true,
+                dunhao_detection: true,
+                range_normalization: true,
+                variant_normalization: false,
+                ellipsis_normalization: true,
+                range_en_dash: false,
+                political_stance: PoliticalStance::RocCentric,
+            },
+            Profile::StrictMoe => ProfileConfig {
+                spelling: true,
+                casing: true,
+                basic_punctuation: true,
+                colon_enforcement: true,
+                dunhao_detection: true,
+                range_normalization: true,
+                variant_normalization: true,
+                ellipsis_normalization: true,
+                range_en_dash: false,
+                political_stance: PoliticalStance::RocCentric,
+            },
+            Profile::UiStrings => ProfileConfig {
+                spelling: true,
+                casing: true,
+                basic_punctuation: true,
+                colon_enforcement: false,
+                dunhao_detection: false,
+                range_normalization: true,
+                variant_normalization: false,
+                ellipsis_normalization: true,
+                range_en_dash: true,
+                political_stance: PoliticalStance::RocCentric,
+            },
+        }
+    }
+
+    /// Parse from string, defaulting to Default on unrecognized input.
+    pub fn from_str_lossy(s: &str) -> Self {
+        match s {
+            "strict_moe" => Profile::StrictMoe,
+            "ui_strings" => Profile::UiStrings,
+            _ => Profile::Default,
+        }
+    }
+
+    /// Strict parse from string. Returns `None` on unrecognized input.
+    pub fn from_str_strict(s: &str) -> Option<Self> {
+        match s {
+            "default" => Some(Profile::Default),
+            "strict_moe" => Some(Profile::StrictMoe),
+            "ui_strings" => Some(Profile::UiStrings),
+            _ => None,
+        }
+    }
+}
+
+/// Political stance sub-profile controlling which PoliticalColoring rules fire.
+///
+/// Orthogonal to the main Profile enum. When None (or RocCentric), all
+/// political_coloring rules apply (current default). International keeps only
+/// organization/entity name normalization (東盟→東協). Neutral suppresses all
+/// political_coloring rules entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PoliticalStance {
+    /// Apply all political_coloring rules (default behavior).
+    RocCentric,
+    /// Only apply organization/entity name rules; skip identity-loaded terms
+    /// (內地, 祖國, 大陸同胞).
+    International,
+    /// Suppress all political_coloring rules.
+    Neutral,
+}
+
+impl PoliticalStance {
+    /// All defined stances.
+    pub const ALL: &'static [PoliticalStance] = &[
+        PoliticalStance::RocCentric,
+        PoliticalStance::International,
+        PoliticalStance::Neutral,
+    ];
+
+    /// Human-readable name.
+    pub fn name(self) -> &'static str {
+        match self {
+            PoliticalStance::RocCentric => "roc_centric",
+            PoliticalStance::International => "international",
+            PoliticalStance::Neutral => "neutral",
+        }
+    }
+
+    /// Short description.
+    pub fn description(self) -> &'static str {
+        match self {
+            PoliticalStance::RocCentric => {
+                "Apply all political/regional normalization rules (default)"
+            }
+            PoliticalStance::International => {
+                "Only normalize international organization names (東盟→東協); skip identity terms"
+            }
+            PoliticalStance::Neutral => "Suppress all political coloring rules",
+        }
+    }
+
+    /// Parse from string, defaulting to RocCentric on unrecognized input.
+    pub fn from_str_lossy(s: &str) -> Self {
+        match s {
+            "international" => PoliticalStance::International,
+            "neutral" => PoliticalStance::Neutral,
+            _ => PoliticalStance::RocCentric,
+        }
+    }
+
+    /// Strict parse from string. Returns `None` on unrecognized input.
+    pub fn from_str_strict(s: &str) -> Option<Self> {
+        match s {
+            "roc_centric" => Some(PoliticalStance::RocCentric),
+            "international" => Some(PoliticalStance::International),
+            "neutral" => Some(PoliticalStance::Neutral),
+            _ => None,
+        }
+    }
+
+    /// Whether a specific political_coloring rule should fire under this stance.
+    ///
+    /// Identity-loaded terms (內地, 大陸同胞, 祖國) are suppressed under
+    /// International. All terms suppressed under Neutral.
+    pub fn allows_rule(self, from: &str) -> bool {
+        match self {
+            PoliticalStance::RocCentric => true,
+            PoliticalStance::Neutral => false,
+            PoliticalStance::International => {
+                // Suppress identity-loaded terms; keep organization names.
+                !matches!(from, "內地" | "大陸同胞" | "祖國")
+            }
+        }
+    }
+}
+
+/// Rule types for spelling/terminology rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleType {
+    /// Mainland China political coloring
+    PoliticalColoring,
+    /// Cross-strait usage difference
+    CrossStrait,
+    /// Typo / spelling correction
+    Typo,
+    /// Confusable term
+    Confusable,
+    /// Character variant: MoE standard form differs from non-standard glyph
+    /// (e.g. 裏->裡, 綫->線). Curated from OpenCC TWVariants.txt.
+    Variant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Severity {
+    Info,
+    Warning,
+    Error,
+}
+
+impl Severity {
+    /// Human-readable lowercase name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Severity::Info => "info",
+            Severity::Warning => "warning",
+            Severity::Error => "error",
+        }
+    }
+}
+
+impl RuleType {
+    pub fn default_severity(self) -> Severity {
+        match self {
+            RuleType::PoliticalColoring | RuleType::Typo => Severity::Error,
+            RuleType::CrossStrait | RuleType::Confusable | RuleType::Variant => Severity::Warning,
+        }
+    }
+}
+
+/// A spelling/terminology rule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpellingRule {
+    /// The term to match (source form to be flagged).
+    pub from: String,
+    /// One or more replacement suggestions (target forms).
+    pub to: Vec<String>,
+    /// Classification of this rule.
+    #[serde(rename = "type")]
+    pub rule_type: RuleType,
+    /// If true, this rule is disabled and will not be used for scanning.
+    #[serde(default)]
+    pub disabled: bool,
+    /// Usage context that helps the AI agent pick the right suggestion
+    /// when multiple correct forms exist or when the term is ambiguous.
+    #[serde(default)]
+    pub context: Option<String>,
+    /// English original term — serves as an unambiguous anchor when the
+    /// same Chinese term means different things across the strait.
+    /// E.g. 並行 = concurrency (TW) vs parallelism (CN).
+    #[serde(default)]
+    pub english: Option<String>,
+    /// Exception phrases where the matched form should not be flagged.
+    /// Applies to all rule types (variant, cross_strait, typo, confusable).
+    /// E.g. chess term 下著 keeps 着; 分類 keeps 類 from firing as a class
+    /// warning.  An empty or absent list means no exceptions.
+    #[serde(default)]
+    pub exceptions: Option<Vec<String>>,
+    /// Surrounding words that suggest the intended meaning for ambiguous terms.
+    /// When present, the fixer uses segmentation to check if these clue words
+    /// appear near the match. E.g. 程序 with clues ["編寫", "代碼", "執行"]
+    /// suggests the "program" sense rather than "procedure".
+    #[serde(default)]
+    pub context_clues: Option<Vec<String>>,
+    /// Words that, when present in the surrounding window, indicate the term is
+    /// being used correctly in context and should NOT be flagged.  Acts as a
+    /// veto: if any negative clue matches, the rule is skipped regardless of
+    /// positive context_clues.  E.g. 項目 should not fire when 的 or 等
+    /// precede it (list-item grammatical usage vs. project/IT usage).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub negative_context_clues: Option<Vec<String>>,
+    /// Optional tags for categorization and filtering in rule packs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+}
+
+impl SpellingRule {
+    /// Create a spelling rule with required fields; optional fields default to None.
+    #[cfg(test)]
+    pub fn new(from: impl Into<String>, to: Vec<String>, rule_type: RuleType) -> Self {
+        Self {
+            from: from.into(),
+            to,
+            rule_type,
+            disabled: false,
+            context: None,
+            english: None,
+            exceptions: None,
+            context_clues: None,
+            negative_context_clues: None,
+            tags: None,
+        }
+    }
+}
+
+/// A proper noun casing rule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaseRule {
+    /// The canonical correct casing (e.g. "JavaScript").
+    pub term: String,
+    /// Other accepted casings (e.g. ["javascript", "JAVASCRIPT"]).
+    #[serde(default)]
+    pub alternatives: Option<Vec<String>>,
+    /// If true, this rule is disabled and will not be used for scanning.
+    #[serde(default)]
+    pub disabled: bool,
+}
+
+/// Top-level ruleset container — the JSON source format.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Ruleset {
+    pub spelling_rules: Vec<SpellingRule>,
+    pub case_rules: Vec<CaseRule>,
+}
+
+/// An issue found by the scanner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Issue {
+    /// Byte offset in the original text.
+    pub offset: usize,
+    /// Byte length of the matched span.
+    pub length: usize,
+    /// 1-based line number in the original text.
+    pub line: usize,
+    /// 1-based column number (UTF-16 code units by default, matching LSP spec).
+    pub col: usize,
+    /// The matched (wrong) text.
+    pub found: String,
+    /// Suggested replacements.
+    pub suggestions: Vec<String>,
+    /// Classification of the triggering rule.
+    pub rule_type: IssueType,
+    /// Severity level.
+    pub severity: Severity,
+    /// Usage context from the triggering rule, helping the AI agent
+    /// choose the right suggestion or understand the nuance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    /// English original term — unambiguous anchor for cross-strait terms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub english: Option<String>,
+    /// Context clues from the triggering rule. Fixer uses these with a
+    /// segmenter to decide whether an ambiguous term should be corrected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_clues: Option<Vec<String>>,
+}
+
+impl Issue {
+    /// Construct an issue with all semantic fields; line/col are set to 0
+    /// (filled in later by the line-index pass).
+    pub fn new(
+        offset: usize,
+        length: usize,
+        found: impl Into<String>,
+        suggestions: Vec<String>,
+        rule_type: IssueType,
+        severity: Severity,
+    ) -> Self {
+        Self {
+            offset,
+            length,
+            line: 0,
+            col: 0,
+            found: found.into(),
+            suggestions,
+            rule_type,
+            severity,
+            context: None,
+            english: None,
+            context_clues: None,
+        }
+    }
+
+    /// Builder: attach context string.
+    pub fn with_context(mut self, ctx: impl Into<String>) -> Self {
+        self.context = Some(ctx.into());
+        self
+    }
+
+    /// Builder: attach english anchor.
+    pub fn with_english(mut self, eng: impl Into<String>) -> Self {
+        self.english = Some(eng.into());
+        self
+    }
+
+    /// Builder: attach context clues.
+    pub fn with_context_clues(mut self, clues: Vec<String>) -> Self {
+        self.context_clues = Some(clues);
+        self
+    }
+}
+
+/// Issue classification — combines SpellingRule types and case rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueType {
+    PoliticalColoring,
+    CrossStrait,
+    Typo,
+    Confusable,
+    Case,
+    Punctuation,
+    Variant,
+}
+
+impl IssueType {
+    /// Stable ordering key for deterministic output (used by scan sort).
+    pub fn sort_order(self) -> u8 {
+        match self {
+            IssueType::PoliticalColoring => 0,
+            IssueType::CrossStrait => 1,
+            IssueType::Typo => 2,
+            IssueType::Confusable => 3,
+            IssueType::Case => 4,
+            IssueType::Punctuation => 5,
+            IssueType::Variant => 6,
+        }
+    }
+}
+
+impl From<RuleType> for IssueType {
+    fn from(rt: RuleType) -> Self {
+        match rt {
+            RuleType::PoliticalColoring => IssueType::PoliticalColoring,
+            RuleType::CrossStrait => IssueType::CrossStrait,
+            RuleType::Typo => IssueType::Typo,
+            RuleType::Confusable => IssueType::Confusable,
+            RuleType::Variant => IssueType::Variant,
+        }
+    }
+}
