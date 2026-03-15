@@ -3,6 +3,7 @@
 // One tool exposed to the MCP client:
 //   zhtw — unified lint / fix / gate for Traditional Chinese (Taiwan) text
 
+use serde::Serialize;
 use serde_json::{json, Value};
 
 use super::prompts;
@@ -867,10 +868,111 @@ fn apply_ignore_set(issues: &mut [Issue], ignore_set: &std::collections::HashSet
 }
 
 /// Issue severity summary counts.
+#[derive(Serialize)]
 struct IssueSummary {
     errors: usize,
     warnings: usize,
     info: usize,
+}
+
+/// Gate status in the tool response.
+#[derive(Serialize)]
+struct GateInfo {
+    enabled: bool,
+    max_errors: usize,
+    residual_errors: usize,
+    max_warnings: usize,
+    residual_warnings: usize,
+}
+
+/// Anchor provenance for explain mode (borrowed).
+#[derive(Serialize)]
+struct AnchorProvenance<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    anchor_en: Option<&'a str>,
+    anchor_match: Option<bool>,
+}
+
+/// Anchor provenance for compact mode (owned).
+#[derive(Serialize)]
+struct AnchorProvenanceOwned {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    anchor_en: Option<String>,
+    anchor_match: Option<bool>,
+}
+
+/// Issue with optional explain annotations, serialized directly without
+/// intermediate Value allocation.
+#[derive(Serialize)]
+struct AnnotatedIssue<'a> {
+    #[serde(flatten)]
+    issue: &'a Issue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    explanation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    anchor_provenance: Option<AnchorProvenance<'a>>,
+}
+
+/// Issues list: either plain references or annotated wrappers.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum IssuesList<'a> {
+    Plain(&'a [Issue]),
+    Annotated(Vec<AnnotatedIssue<'a>>),
+}
+
+/// Location in compact mode.
+#[derive(Serialize)]
+struct CompactLocation {
+    line: usize,
+    col: usize,
+}
+
+/// Calibration stats from translation verification.
+#[cfg(feature = "translate")]
+#[derive(Serialize)]
+struct VerifyStats {
+    api_ok: bool,
+    matched: usize,
+    unmatched: usize,
+    no_english: usize,
+}
+
+/// Full-detail tool response (serialized directly, no intermediate Value).
+#[derive(Serialize)]
+struct FullOutput<'a> {
+    accepted: bool,
+    text: &'a str,
+    issues: IssuesList<'a>,
+    applied_fixes: usize,
+    summary: &'a IssueSummary,
+    gate: GateInfo,
+    profile: &'a str,
+    political_stance: &'a str,
+    detected_script: &'a str,
+    s2t_applied: bool,
+    trace: &'a Trace,
+    #[cfg(feature = "translate")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verify: Option<VerifyStats>,
+}
+
+/// Compact tool response (serialized directly, no intermediate Value).
+#[derive(Serialize)]
+struct CompactOutput<'a> {
+    accepted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<&'a str>,
+    issues: Vec<CompactGroup>,
+    applied_fixes: usize,
+    summary: &'a IssueSummary,
+    gate: GateInfo,
+    profile: &'a str,
+    detected_script: &'a str,
+    s2t_applied: bool,
+    #[cfg(feature = "translate")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verify: Option<VerifyStats>,
 }
 
 /// Count issues by severity.
@@ -915,6 +1017,10 @@ struct CheckOutputParams<'a> {
 /// Both the lint-only and fix paths produce the same output shape; only the
 /// concrete values differ. Compact mode omits text (in lint-only), trace,
 /// byte offsets/lengths, and deduplicates repeated issues.
+///
+/// Serializes typed structs directly to avoid intermediate `serde_json::Value`
+/// allocations. Uses compact JSON by default; set `ZHTW_PRETTY=1` env var
+/// for indented output during debugging.
 fn build_check_output(params: &CheckOutputParams<'_>) -> CallToolResult {
     let summary = build_summary(params.issues);
 
@@ -926,82 +1032,66 @@ fn build_check_output(params: &CheckOutputParams<'_>) -> CallToolResult {
             .max_warnings
             .is_none_or(|_| summary.warnings <= max_warn);
 
-    let output = match params.output_mode {
+    let gate = GateInfo {
+        enabled: gate_enabled,
+        max_errors: max_err,
+        residual_errors: summary.errors,
+        max_warnings: max_warn,
+        residual_warnings: summary.warnings,
+    };
+
+    #[cfg(feature = "translate")]
+    let verify = params.calibrate_result.as_ref().map(|cr| VerifyStats {
+        api_ok: cr.api_ok,
+        matched: cr.matched,
+        unmatched: cr.unmatched,
+        no_english: cr.no_english,
+    });
+
+    let serialize_result = match params.output_mode {
         OutputMode::Full => {
-            // Full mode: complete per-issue detail with byte offsets, trace, text echo.
-            let issues_value = build_issues_full(params.issues, params.explain);
-            json!({
-                "accepted": accepted,
-                "text": params.result_text,
-                "issues": issues_value,
-                "applied_fixes": params.applied_fixes,
-                "summary": {
-                    "errors": summary.errors,
-                    "warnings": summary.warnings,
-                    "info": summary.info,
-                },
-                "gate": {
-                    "enabled": gate_enabled,
-                    "max_errors": max_err,
-                    "residual_errors": summary.errors,
-                    "max_warnings": max_warn,
-                    "residual_warnings": summary.warnings,
-                },
-                "profile": params.profile.name(),
-                "political_stance": params.stance_name,
-                "detected_script": params.detected_script,
-                "s2t_applied": params.s2t_applied,
-                "trace": params.trace,
-            })
+            let issues = build_issues_list(params.issues, params.explain);
+            let output = FullOutput {
+                accepted,
+                text: params.result_text,
+                issues,
+                applied_fixes: params.applied_fixes,
+                summary: &summary,
+                gate,
+                profile: params.profile.name(),
+                political_stance: params.stance_name,
+                detected_script: params.detected_script,
+                s2t_applied: params.s2t_applied,
+                trace: params.trace,
+                #[cfg(feature = "translate")]
+                verify,
+            };
+            serialize_output(&output)
         }
         OutputMode::Compact => {
-            // Compact mode: omit text (unless fixes applied), omit trace,
-            // deduplicate issues, strip byte offsets/lengths.
-            let issues_value = build_issues_compact(params.issues, params.explain);
-            let mut obj = json!({
-                "accepted": accepted,
-                "issues": issues_value,
-                "applied_fixes": params.applied_fixes,
-                "summary": {
-                    "errors": summary.errors,
-                    "warnings": summary.warnings,
-                    "info": summary.info,
+            let issues = build_compact_groups(params.issues, params.explain);
+            let output = CompactOutput {
+                accepted,
+                text: if params.has_fixes {
+                    Some(params.result_text)
+                } else {
+                    None
                 },
-                "gate": {
-                    "enabled": gate_enabled,
-                    "max_errors": max_err,
-                    "residual_errors": summary.errors,
-                    "max_warnings": max_warn,
-                    "residual_warnings": summary.warnings,
-                },
-                "profile": params.profile.name(),
-                "detected_script": params.detected_script,
-                "s2t_applied": params.s2t_applied,
-            });
-            // Include text only when fixes were applied (agent needs corrected output).
-            if params.has_fixes {
-                obj["text"] = Value::String(params.result_text.to_string());
-            }
-            obj
+                issues,
+                applied_fixes: params.applied_fixes,
+                summary: &summary,
+                gate,
+                profile: params.profile.name(),
+                detected_script: params.detected_script,
+                s2t_applied: params.s2t_applied,
+                #[cfg(feature = "translate")]
+                verify,
+            };
+            serialize_output(&output)
         }
     };
 
-    // Append calibration stats when anchor-verification was used.
-    #[cfg(feature = "translate")]
-    let output = {
-        let mut out = output;
-        if let Some(ref cr) = params.calibrate_result {
-            out["verify"] = json!({
-                "api_ok": cr.api_ok,
-                "matched": cr.matched,
-                "unmatched": cr.unmatched,
-                "no_english": cr.no_english,
-            });
-        }
-        out
-    };
-
-    match serde_json::to_string_pretty(&output) {
+    match serialize_result {
         Ok(json_str) => {
             if accepted {
                 CallToolResult::text(json_str)
@@ -1016,48 +1106,50 @@ fn build_check_output(params: &CheckOutputParams<'_>) -> CallToolResult {
     }
 }
 
-/// Build full-detail issues array, with optional explain annotations.
-fn build_issues_full(issues: &[Issue], explain: bool) -> Value {
+/// Serialize to compact JSON by default; pretty-print when `ZHTW_PRETTY=1`.
+fn serialize_output(output: &impl serde::Serialize) -> serde_json::Result<String> {
+    if std::env::var_os("ZHTW_PRETTY").is_some_and(|v| v == "1") {
+        serde_json::to_string_pretty(output)
+    } else {
+        serde_json::to_string(output)
+    }
+}
+
+/// Build issues list for full output mode: either plain references (no explain)
+/// or annotated wrappers with explanation and anchor provenance.
+fn build_issues_list<'a>(issues: &'a [Issue], explain: bool) -> IssuesList<'a> {
     if explain {
-        let annotated: Vec<Value> = issues
+        let annotated: Vec<AnnotatedIssue<'a>> = issues
             .iter()
-            .filter_map(|issue| match serde_json::to_value(issue) {
-                Ok(mut obj) => {
-                    if let Some(explanation) = build_explanation(issue) {
-                        obj["explanation"] = Value::String(explanation);
-                    }
-                    // Anchor provenance: structured object for LLM reasoning chains.
-                    if issue.anchor_match.is_some() {
-                        let mut prov = serde_json::Map::new();
-                        if let Some(eng) = &issue.english {
-                            prov.insert("anchor_en".into(), json!(eng));
-                        }
-                        prov.insert("anchor_match".into(), json!(issue.anchor_match));
-                        obj["anchor_provenance"] = Value::Object(prov);
-                    }
-                    Some(obj)
-                }
-                Err(e) => {
-                    log::error!("failed to serialize issue: {e}");
+            .map(|issue| {
+                let explanation = build_explanation(issue);
+                let anchor_provenance = if issue.anchor_match.is_some() {
+                    Some(AnchorProvenance {
+                        anchor_en: issue.english.as_deref(),
+                        anchor_match: issue.anchor_match,
+                    })
+                } else {
                     None
+                };
+                AnnotatedIssue {
+                    issue,
+                    explanation,
+                    anchor_provenance,
                 }
             })
             .collect();
-        Value::Array(annotated)
+        IssuesList::Annotated(annotated)
     } else {
-        serde_json::to_value(issues).unwrap_or_else(|e| {
-            log::error!("failed to serialize issues: {e}");
-            Value::Array(Vec::new())
-        })
+        IssuesList::Plain(issues)
     }
 }
 
 /// Build compact deduplicated issues array.
 ///
-/// Groups issues by (found, rule_type, suggestions) key. Each group becomes
-/// one entry with count and locations: [{line, col}, ...]. Omits byte
-/// offset/length to save tokens.
-fn build_issues_compact(issues: &[Issue], explain: bool) -> Value {
+/// Groups issues by (found, rule_type, suggestions, severity) key. Each group
+/// becomes one entry with count and locations. Serialized directly via
+/// `#[derive(Serialize)]` on `CompactGroup` — no intermediate `Value` per group.
+fn build_compact_groups(issues: &[Issue], explain: bool) -> Vec<CompactGroup> {
     use std::collections::BTreeMap;
 
     // Key: (found, rule_type, suggestions_joined, severity)
@@ -1086,12 +1178,10 @@ fn build_issues_compact(issues: &[Issue], explain: bool) -> Value {
                 None
             },
             anchor_provenance: if explain && issue.anchor_match.is_some() {
-                let mut prov = serde_json::Map::new();
-                if let Some(eng) = &issue.english {
-                    prov.insert("anchor_en".into(), json!(eng));
-                }
-                prov.insert("anchor_match".into(), json!(issue.anchor_match));
-                Some(Value::Object(prov))
+                Some(AnchorProvenanceOwned {
+                    anchor_en: issue.english.clone(),
+                    anchor_match: issue.anchor_match,
+                })
             } else {
                 None
             },
@@ -1099,53 +1189,32 @@ fn build_issues_compact(issues: &[Issue], explain: bool) -> Value {
             locations: Vec::new(),
         });
         group.count += 1;
-        group.locations.push((issue.line, issue.col));
+        group.locations.push(CompactLocation {
+            line: issue.line,
+            col: issue.col,
+        });
     }
 
-    let entries: Vec<Value> = groups
-        .into_values()
-        .map(|g| {
-            let mut obj = json!({
-                "found": g.found,
-                "suggestions": g.suggestions,
-                "rule_type": g.rule_type,
-                "severity": g.severity,
-                "count": g.count,
-                "locations": g.locations.iter()
-                    .map(|(l, c)| json!({"line": l, "col": c}))
-                    .collect::<Vec<_>>(),
-            });
-            if let Some(ctx) = &g.context {
-                obj["context"] = Value::String(ctx.clone());
-            }
-            if let Some(eng) = &g.english {
-                obj["english"] = Value::String(eng.clone());
-            }
-            if let Some(expl) = &g.explanation {
-                obj["explanation"] = Value::String(expl.clone());
-            }
-            if let Some(prov) = &g.anchor_provenance {
-                obj["anchor_provenance"] = prov.clone();
-            }
-            obj
-        })
-        .collect();
-
-    Value::Array(entries)
+    groups.into_values().collect()
 }
 
 /// Helper for compact mode issue grouping.
+#[derive(Serialize)]
 struct CompactGroup {
     found: String,
     suggestions: Vec<String>,
     rule_type: String,
     severity: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     context: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     english: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     explanation: Option<String>,
-    anchor_provenance: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    anchor_provenance: Option<AnchorProvenanceOwned>,
     count: usize,
-    locations: Vec<(usize, usize)>,
+    locations: Vec<CompactLocation>,
 }
 
 // Tool definitions (JSON Schema for zhtw)
