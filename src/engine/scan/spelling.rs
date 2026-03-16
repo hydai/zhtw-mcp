@@ -66,9 +66,10 @@ impl Scanner {
         issues: &mut Vec<Issue>,
         cfg: &ProfileConfig,
     ) {
-        // Pre-scan: build clue position index.  One O(n) AC pass replaces
-        // per-match MMSEG segmentation for context-clue checking.
-        let clue_hits = self.build_clue_hits(text, excluded);
+        // Lazy clue pre-scan: defer the O(n) clue AC pass until a matched
+        // rule actually needs context-clue checking.  Only ~7% of rules
+        // have context_clues, so most matches skip the clue AC entirely.
+        let mut clue_hits_cache: Option<ClueHits> = None;
 
         // Dispatch to charwise AC when available; fall back to bytewise.
         if let Some(ref cw_ac) = self.spelling_ac_charwise {
@@ -79,7 +80,7 @@ impl Scanner {
                     zh_type,
                     issues,
                     cfg,
-                    &clue_hits,
+                    &mut clue_hits_cache,
                     mat.start(),
                     mat.end(),
                     mat.value(),
@@ -93,7 +94,7 @@ impl Scanner {
                     zh_type,
                     issues,
                     cfg,
-                    &clue_hits,
+                    &mut clue_hits_cache,
                     mat.start(),
                     mat.end(),
                     mat.pattern().as_usize(),
@@ -113,7 +114,7 @@ impl Scanner {
         zh_type: ChineseType,
         issues: &mut Vec<Issue>,
         cfg: &ProfileConfig,
-        clue_hits: &ClueHits,
+        clue_hits_cache: &mut Option<ClueHits>,
         start: usize,
         end: usize,
         rule_idx: usize,
@@ -181,17 +182,18 @@ impl Scanner {
 
         // Context-clue gate via pre-scan hits.
         //
-        // Instead of MMSEG-segmenting a ±40-char window per match, we check
-        // the pre-built clue_hits list: binary-search for clue occurrences
-        // within the byte-offset window around this match.  This reduces
-        // per-match cost from O(W × L³) to O(C × log H) where C = number
-        // of clues for this rule and H = total clue hits in the text.
+        // The clue AC pass is deferred until a matched rule actually needs
+        // context-clue checking (~7% of rules).  This avoids the O(n) clue
+        // AC scan entirely for the 93% of matches that never check clues.
         let has_pos = self.rule_pos_clue_ids[rule_idx].is_some();
         let has_neg = self.rule_neg_clue_ids[rule_idx].is_some();
 
         if has_pos || has_neg {
+            let clue_hits =
+                clue_hits_cache.get_or_insert_with(|| self.build_clue_hits(text, excluded));
+
             // Compute byte-offset window matching surrounding_window_bounded
-            // semantics: ±CONTEXT_WINDOW_CHARS characters, clamped at excluded
+            // semantics: +-CONTEXT_WINDOW_CHARS characters, clamped at excluded
             // range boundaries.
             let (win_start, win_end) = context_byte_window(text, start, end, excluded);
 
@@ -242,12 +244,18 @@ fn context_byte_window(
     // Find paragraph boundaries (\n\n or \r\n\r\n) around the match.
     // Context clues from a different paragraph are semantically irrelevant
     // and can cause false triggers/suppressions.
+    //
+    // Clamp the search range to CONTEXT_WINDOW_CHARS * 4 bytes (max possible
+    // window extent for CJK text) to avoid O(N) scans per match.
+    let max_search = CONTEXT_WINDOW_CHARS * 4;
     let para_start = {
-        let search = &bytes[..match_start];
-        find_last_paragraph_break(search).map_or(0, |pos| pos + 1)
+        let search_start = match_start.saturating_sub(max_search);
+        let search = &bytes[search_start..match_start];
+        find_last_paragraph_break(search).map_or(0, |pos| search_start + pos + 1)
     };
     let para_end = {
-        let search = &bytes[match_end..];
+        let search_end = (match_end + max_search).min(text.len());
+        let search = &bytes[match_end..search_end];
         find_first_paragraph_break(search).map_or(text.len(), |pos| match_end + pos)
     };
 

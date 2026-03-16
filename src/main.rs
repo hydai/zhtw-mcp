@@ -459,8 +459,20 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
         &pack_store,
         params.active_packs,
     );
+    let ruleset_hash = zhtw_mcp::rules::loader::compute_ruleset_hash(&spelling_rules, &case_rules);
     let scanner = zhtw_mcp::engine::scan::Scanner::new(spelling_rules, case_rules);
     let s2t = zhtw_mcp::engine::s2t::S2TConverter::new();
+
+    // Scan cache: skip re-scanning unchanged files (lint-only, no fix).
+    // Disabled when --verify is active (calibrate_issues needs the full text).
+    // Wrapped in Mutex for rayon parallel scanning.
+    let mut use_cache = params.fix_mode == zhtw_mcp::fixer::FixMode::None;
+    #[cfg(feature = "translate")]
+    if params.verify {
+        use_cache = false;
+    }
+    let scan_cache =
+        use_cache.then(|| std::sync::Mutex::new(zhtw_mcp::cache::ScanCache::open_default()));
 
     // --diff-from: resolve changed files via git, use as file args.
     let diff_files: Vec<String>;
@@ -490,8 +502,21 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
     let mut baseline_count: usize = 0;
     let mut tabular_header_printed = false;
 
-    for file_arg in &resolved {
-        // Content type: explicit override > auto-detect from extension.
+    /// Maximum file size for CLI lint mode (16 MiB).
+    const MAX_CLI_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+    // Phase 1: Read + S2T + cache check + scan.
+    //
+    // This closure is shared between sequential and parallel (rayon) paths.
+    // It captures only &-refs to immutable state plus the Mutex-wrapped cache,
+    // making it Fn + Send + Sync.
+    let fix_mode_str = format!("{:?}", params.fix_mode);
+    let scan_file = |file_arg: &str| -> Result<(
+        String,
+        bool,
+        zhtw_mcp::engine::scan::ScanOutput,
+        zhtw_mcp::engine::scan::ContentType,
+    )> {
         let content_type = match params.content_type_override {
             Some("markdown") => zhtw_mcp::engine::scan::ContentType::Markdown,
             Some("markdown-scan-code") => zhtw_mcp::engine::scan::ContentType::MarkdownScanCode,
@@ -508,49 +533,146 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
             }
         };
 
-        /// Maximum file size for CLI lint mode (16 MiB).
-        const MAX_CLI_FILE_BYTES: u64 = 16 * 1024 * 1024;
+        let cache_params = zhtw_mcp::cache::ScanParams {
+            ruleset_hash: ruleset_hash.clone(),
+            profile: profile.name().to_owned(),
+            content_type: format!("{content_type:?}"),
+            fix_mode: fix_mode_str.clone(),
+        };
 
-        let mut text = if file_arg == "--" {
-            let mut buf = String::new();
-            std::io::stdin()
-                .take(MAX_CLI_FILE_BYTES + 1)
-                .read_to_string(&mut buf)
-                .context("read stdin")?;
-            anyhow::ensure!(
-                buf.len() as u64 <= MAX_CLI_FILE_BYTES,
-                "stdin input exceeds {MAX_CLI_FILE_BYTES} byte limit"
-            );
-            buf
-        } else {
-            let meta =
-                std::fs::metadata(file_arg).with_context(|| format!("stat file: {file_arg}"))?;
+        // Open file via fd, stat from the fd (TOCTOU-safe).
+        // Check cache BEFORE reading — fast path avoids file I/O entirely.
+        if file_arg != "--" {
+            let file =
+                std::fs::File::open(file_arg).with_context(|| format!("open file: {file_arg}"))?;
+            let meta = file
+                .metadata()
+                .with_context(|| format!("stat file: {file_arg}"))?;
             anyhow::ensure!(
                 meta.len() <= MAX_CLI_FILE_BYTES,
                 "{file_arg}: file too large ({} bytes, limit {MAX_CLI_FILE_BYTES})",
                 meta.len()
             );
-            std::fs::read_to_string(file_arg).with_context(|| format!("read file: {file_arg}"))?
-        };
 
-        // Auto-detect Simplified Chinese and convert to Traditional via S2T.
+            // Fast-path: check mtime+size before reading the file.
+            let fast_hit = scan_cache.as_ref().and_then(|mtx| {
+                let c = mtx.lock().ok()?;
+                let mtime = zhtw_mcp::cache::mtime_secs(&meta);
+                c.check_fast(file_arg, mtime, meta.len(), &cache_params)
+                    .into_hit()
+            });
+            if let Some(hit) = fast_hit {
+                if !hit.input_was_sc {
+                    // Cache hit for non-SC file — skip file read and scan.
+                    return Ok((String::new(), false, hit.output, content_type));
+                }
+                // SC files need the text for S2T write-back; fall through.
+            }
+
+            // Slow path: read file from the same fd.
+            let mut text = String::with_capacity(meta.len() as usize);
+            std::io::BufReader::new(file)
+                .read_to_string(&mut text)
+                .with_context(|| format!("read file: {file_arg}"))?;
+
+            let input_was_sc = zhtw_mcp::engine::zhtype::detect_chinese_type(&text)
+                == zhtw_mcp::engine::zhtype::ChineseType::Simplified;
+            if input_was_sc {
+                text = s2t.convert(&text);
+            }
+
+            // Slow-path cache: check content hash (mtime missed but content
+            // may be unchanged, e.g. after `touch`).
+            let content_hit = scan_cache.as_ref().and_then(|mtx| {
+                let c = mtx.lock().ok()?;
+                c.check_content(file_arg, text.as_bytes(), &cache_params)
+            });
+            let output = match content_hit {
+                Some(hit) => hit.output,
+                None => {
+                    let o = scanner.scan_for_content_type(&text, content_type, profile);
+                    if let Some(Ok(mut c)) = scan_cache.as_ref().map(|mtx| mtx.lock()) {
+                        let mtime = zhtw_mcp::cache::mtime_secs(&meta);
+                        c.put(
+                            file_arg,
+                            text.as_bytes(),
+                            mtime,
+                            meta.len(),
+                            &cache_params,
+                            o.clone(),
+                            input_was_sc,
+                        );
+                    }
+                    o
+                }
+            };
+
+            // Drop text eagerly when not needed for fix/write-back/verify
+            // to avoid accumulating all files' text in parallel scans.
+            let mut need_text = input_was_sc || params.fix_mode != zhtw_mcp::fixer::FixMode::None;
+            #[cfg(feature = "translate")]
+            if params.verify {
+                need_text = true;
+            }
+            if !need_text {
+                text = String::new();
+            }
+
+            return Ok((text, input_was_sc, output, content_type));
+        }
+
+        // stdin path.
+        let mut text = String::new();
+        std::io::stdin()
+            .take(MAX_CLI_FILE_BYTES + 1)
+            .read_to_string(&mut text)
+            .context("read stdin")?;
+        anyhow::ensure!(
+            text.len() as u64 <= MAX_CLI_FILE_BYTES,
+            "stdin input exceeds {MAX_CLI_FILE_BYTES} byte limit"
+        );
+
         let input_was_sc = zhtw_mcp::engine::zhtype::detect_chinese_type(&text)
             == zhtw_mcp::engine::zhtype::ChineseType::Simplified;
         if input_was_sc {
             text = s2t.convert(&text);
         }
+        let output = scanner.scan_for_content_type(&text, content_type, profile);
 
-        let scan = |input: &str| -> zhtw_mcp::engine::scan::ScanOutput {
-            scanner.scan_for_content_type(input, content_type, profile)
-        };
+        Ok((text, input_was_sc, output, content_type))
+    };
 
-        let output = scan(&text);
+    // Parallel scan when multiple files and no stdin pipe.
+    // Rayon parallelism gives N/cores speedup on multi-file lint.
+    let has_stdin = resolved.iter().any(|f| f == "--");
+    let scan_results: Vec<
+        Result<(
+            String,
+            bool,
+            zhtw_mcp::engine::scan::ScanOutput,
+            zhtw_mcp::engine::scan::ContentType,
+        )>,
+    > = if resolved.len() > 1 && !has_stdin {
+        use rayon::prelude::*;
+        resolved.par_iter().map(|f| scan_file(f)).collect()
+    } else {
+        resolved.iter().map(|f| scan_file(f)).collect()
+    };
+
+    // Phase 2: Fix + report (always sequential for ordered output).
+    for (file_arg, scan_result) in resolved.iter().zip(scan_results) {
+        let (text, input_was_sc, output, content_type) = scan_result?;
+
         let detected_script = if input_was_sc {
             "simplified"
         } else {
             output.detected_script.name()
         };
         let issues = output.issues;
+
+        let scan = |input: &str| -> zhtw_mcp::engine::scan::ScanOutput {
+            scanner.scan_for_content_type(input, content_type, profile)
+        };
 
         // Apply fixes if requested.
         let fix_result = if params.fix_mode != zhtw_mcp::fixer::FixMode::None {
@@ -590,9 +712,9 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
                 // Atomic write: tempfile + rename in the same directory.
                 let file_path = Path::new(file_arg);
                 let parent = file_path.parent().unwrap_or(Path::new("."));
-                let tmp = tempfile::NamedTempFile::new_in(parent)
+                let mut tmp = tempfile::NamedTempFile::new_in(parent)
                     .with_context(|| format!("create tempfile in {}", parent.display()))?;
-                std::fs::write(tmp.path(), output_text)
+                std::io::Write::write_all(&mut tmp, output_text.as_bytes())
                     .with_context(|| format!("write tempfile for {file_arg}"))?;
                 tmp.persist(file_path)
                     .with_context(|| format!("rename tempfile to {file_arg}"))?;
@@ -1009,6 +1131,13 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
             }]
         });
         println!("{}", serde_json::to_string_pretty(&sarif)?);
+    }
+
+    // Flush scan cache before potential process::exit (which skips Drop).
+    if let Some(ref cache_mtx) = scan_cache {
+        if let Ok(mut c) = cache_mtx.lock() {
+            c.flush();
+        }
     }
 
     // Exit 1 if total error-severity or warning-severity issues exceed thresholds.

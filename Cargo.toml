@@ -24,6 +24,9 @@ aho-corasick = "1"
 daachorse = "1"
 regex = "1"
 sha2 = "0.10"
+blake3 = "1"
+bincode = "1"
+rayon = "1"
 anyhow = "1"
 unicode-normalization = "0.1"
 pulldown-cmark = { version = "0.12", default-features = false }
@@ -35,7 +38,7 @@ toml = "0.8"
 tokio = { version = "1", features = ["rt", "io-util", "time", "sync", "macros", "io-std"], optional = true }
 ureq = { version = "3", optional = true }
 urlencoding = { version = "2", optional = true }
-rustc-hash = "2.1.1"
+rustc-hash = "2"
 fs2 = "0.4"
 
 [dev-dependencies]

@@ -52,7 +52,7 @@ use self::quotes::{fix_quote_pairing, validate_quote_hierarchy};
 /// detected during scanning.  Returning detected_script here eliminates the
 /// need for callers to run a second O(n) detect_chinese_type pass over the
 /// same text.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanOutput {
     pub issues: Vec<Issue>,
     pub detected_script: ChineseType,
@@ -543,7 +543,7 @@ impl Scanner {
                 if let Some(&idx) = clue_map.get(s) {
                     idx
                 } else {
-                    let idx = clue_vec.len() as u16;
+                    let idx = u16::try_from(clue_vec.len()).expect("clue index overflow");
                     clue_map.insert(s.clone(), idx);
                     clue_vec.push(s.clone());
                     idx
