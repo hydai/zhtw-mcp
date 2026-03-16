@@ -19,7 +19,7 @@ Read `zh-tw://style-guide/moe` resource for full conventions.
 
 - Terms: 軟體 (not 軟件), 資訊 (not 信息), 預設 (not 默認)
 - Punctuation: full-width ，。：；！？ in CJK prose; 「」 quotes, 『』 nested
-- Profiles: `default` | `strict_moe` (char variants) | `ui_strings` (relaxed)
+- Profiles: `default` | `strict_moe` (char variants) | `ui_strings` (relaxed) | `editorial` (AI writing review)
 
 ### Quality Gate
 
@@ -195,7 +195,8 @@ Use `zhtw` for linting, fixing, and gating zh-TW text:
 ## Profiles
 - `default`: Standard vocabulary + punctuation
 - `strict_moe`: Full MoE enforcement including character variants
-- `ui_strings`: Relaxed for software UI (half-width colons allowed)"#
+- `ui_strings`: Relaxed for software UI (half-width colons allowed)
+- `editorial`: AI writing review — detects filler phrases, semantic safety words, copula/passive overuse"#
         .to_string()
 }
 
@@ -208,7 +209,7 @@ The zhtw-mcp MCP server provides automated zh-TW linting and fixing.
 
 ## MCP Tool: zhtw
 - `zhtw({ "text": "...", "fix_mode": "lexical_safe", "max_errors": 0 })`
-- Profiles: default, strict_moe, ui_strings
+- Profiles: default, strict_moe, ui_strings, editorial (AI writing review)
 - Content types: plain, markdown
 
 ## Taiwan-Standard Terms
@@ -237,7 +238,7 @@ zhtw-mcp provides `zhtw` for Traditional Chinese (Taiwan) text enforcement.
 ## Quick Reference
 - Terms: 軟體/資訊/預設/程式/網路/硬體/品質/螢幕 (TW standard)
 - Punctuation: ，。：；！？ (full-width in CJK), 「」『』 (quotes)
-- Profiles: default | strict_moe | ui_strings"#
+- Profiles: default | strict_moe | ui_strings | editorial (AI writing review)"#
         .to_string()
 }
 
@@ -273,7 +274,7 @@ The single unified tool for linting, fixing, and gating zh-TW text.
 | text | string | (required) | Text to check |
 | fix_mode | string | "none" | "none", "orthographic", "lexical_safe", or "lexical_contextual" |
 | max_errors | integer | (none) | Gate: reject if errors exceed this |
-| profile | string | "default" | "default", "strict_moe", "ui_strings" |
+| profile | string | "default" | "default", "strict_moe", "ui_strings", "editorial" |
 | content_type | string | "plain" | "plain" or "markdown" |
 | political_stance | string | "roc_centric" | "roc_centric", "international", "neutral" |
 | ignore_terms | array | [] | Terms to downgrade to Info severity |
@@ -390,6 +391,92 @@ pub fn generate_for_host(host: Host) -> serde_json::Value {
     }
 }
 
+/// Generate a zh-TW translation style guide as a JSON setup object.
+///
+/// Returns a `serde_json::Value` following the same JSON contract as
+/// `generate_for_host()`: {host, file, instruction, content}.
+/// Designed to be injected into LLM system prompts to prevent common
+/// AI writing artifacts at generation time. Covers: cross-strait
+/// terminology, semantic safety alternatives, nominalization avoidance,
+/// filler prohibition, and verb-driven syntax.
+pub fn generate_translation_guide() -> serde_json::Value {
+    let guide = translation_guide_text();
+    serde_json::json!({
+        "host": "translation-guide",
+        "file": "(system prompt injection)",
+        "instruction": "Inject the following into your LLM system prompt:",
+        "content": guide,
+    })
+}
+
+/// The raw translation guide text content.
+fn translation_guide_text() -> String {
+    r#"# 繁體中文（台灣）翻譯風格指南
+
+## 目的
+本指南用於 LLM 系統提示，確保產出的繁體中文文本符合台灣教育部標準，
+避免常見的 AI 翻譯偽跡（translation artifact）。
+
+## 詞彙規範
+
+### 跨海峽術語
+使用台灣慣用譯名，避免中國大陸用語：
+- 軟體（非「軟件」）、硬體（非「硬件」）
+- 程式（非「程序」，指 program）、程式碼（非「代碼」）
+- 記憶體（非「內存」）、網路（非「網絡」）
+- 資料庫（非「數據庫」）、資料（非「數據」，指 data）
+- 伺服器（非「服務器」）、瀏覽器（非簡體「浏览器」）
+- 滑鼠（非「鼠標」）、列印（非「打印」）
+- 預設（非「默認」）、支援（非「支持」，指 support）
+
+### 語意安全詞
+避免直接翻譯「means」為「意味著」。根據語境選擇：
+- 定義語境 →「表示」（X 表示 Y）
+- 因果語境 →「代表」（這代表我們需要……）
+- 解釋語境 →「也就是說」
+
+### 避免繁複動詞
+- 避免「作為」「標誌著」「充當」等書面語堆疊，改以簡潔句式表達
+- 避免「擁有」「設有」等冗餘動詞（技術文件語境），直接敘述
+- 用主動語態取代「被廣泛使用」→「廣泛使用」
+
+## AI 寫作偽跡禁忌
+
+### 禁用填充詞
+以下片語在 AI 生成文本中出現頻率異常高，應避免或替換：
+- ❌ 值得注意的是 → ✅ 直接陳述事實
+- ❌ 需要注意的是 → ✅ 直接陳述事實
+- ❌ 更重要的是 → ✅ 精簡為直述句
+- ❌ 在某種程度上 → ✅ 刪除或改為具體程度
+- ❌ 不容忽視 → ✅ 用具體影響取代
+- ❌ 深刻影響 → ✅ 說明具體影響
+
+### 禁用說教句式
+- ❌ 讓我們……（祈使句開頭）
+- ❌ 我們需要理解……（居高臨下）
+- ❌ ……是非常重要的（空泛強調）
+
+### 結構限制
+- 避免過度使用列表：列表段落不應超過全文 40%
+- 避免公式化段落結尾：「這……證明了」「正是這……讓」
+- 避免二元對比堆疊：同一段落不要連續使用「雖然……但」「不僅……更」
+- 段落內破折號（——）不超過 2 個
+- 避免公式化標題：「挑戰與未來展望」「結論與展望」「核心優勢」
+
+## 標點符號
+- 使用全形標點：，。！？；：（）「」『』
+- 引號層級：外層「」，內層『』
+- 刪節號：使用「……」（兩個 U+2026），非「...」
+- 數字範圍：使用「～」或「–」，非「-」
+
+## 語法
+- CJK 與半形字母/數字間加一個半形空格
+- 避免 的/地/得 誤用
+- 句子以動詞驅動，減少名詞化（nominalization）
+"#
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,6 +570,18 @@ mod tests {
         assert!(instructions.contains("max_errors"));
         assert!(instructions.contains("軟體"));
         assert!(instructions.contains("full-width"));
+    }
+
+    #[test]
+    fn translation_guide_json_contract() {
+        let guide = generate_translation_guide();
+        assert!(guide.is_object());
+        assert_eq!(guide["host"], "translation-guide");
+        assert_eq!(guide["file"], "(system prompt injection)");
+        let content = guide["content"].as_str().unwrap();
+        assert!(content.contains("繁體中文"));
+        assert!(content.contains("值得注意的是"));
+        assert!(content.len() > 500);
     }
 
     #[test]

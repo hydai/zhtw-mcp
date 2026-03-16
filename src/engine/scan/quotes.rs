@@ -8,7 +8,7 @@ use crate::rules::ruleset::{Issue, Severity};
 
 use super::{has_paragraph_break, punct_issue_sev, split_paragraphs};
 
-/// Fix CN quotation mark pairing with depth-based nesting (2.4).
+/// Fix CN quotation mark pairing with depth-based nesting.
 ///
 /// CN text uses \u{201c} (opening) and \u{201d} (closing).  TW text uses
 /// 「 and 」 at depth 0, 『 and 』 at depth 1, alternating for deeper nesting.
@@ -113,7 +113,7 @@ pub(crate) fn fix_quote_pairing(text: &str, issues: &mut [Issue]) {
     //  this is a no-op unless future logic needs to adjust them.)
 }
 
-/// Stack-based quote hierarchy validator (12.1).
+/// Stack-based quote hierarchy validator.
 ///
 /// Walks text (skipping exclusion zones) and validates structural nesting of
 /// CJK quote marks: 「」 (primary), 『』 (secondary), 《》 (book title).

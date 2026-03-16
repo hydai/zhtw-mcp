@@ -50,6 +50,10 @@ pub struct ScanParams {
     // Currently always "None" because caching is disabled when fix_mode
     // is active.  Kept for forward-compatibility.
     pub fix_mode: String,
+    // Whether AI detection is active — changes scan results.
+    pub detect_ai: bool,
+    // AI threshold level (formatted f32) — different multipliers produce different results.
+    pub ai_threshold: String,
 }
 
 /// A single cached entry.
@@ -82,7 +86,7 @@ pub struct CacheHit {
 /// Result of a cache lookup.
 pub enum CacheResult {
     /// Fast-path hit: mtime+size match, no file read needed.
-    Hit(CacheHit),
+    Hit(Box<CacheHit>),
     /// mtime changed or no entry: caller must read file and call `check_content`.
     Miss,
 }
@@ -91,7 +95,7 @@ impl CacheResult {
     /// Extract the cached hit, or None on miss.
     pub fn into_hit(self) -> Option<CacheHit> {
         match self {
-            CacheResult::Hit(h) => Some(h),
+            CacheResult::Hit(h) => Some(*h),
             CacheResult::Miss => None,
         }
     }
@@ -128,10 +132,10 @@ impl ScanCache {
                 && entry.file_meta.mtime_secs == mtime_secs
                 && entry.file_meta.size == size
             {
-                return CacheResult::Hit(CacheHit {
+                return CacheResult::Hit(Box::new(CacheHit {
                     output: entry.output.clone(),
                     input_was_sc: entry.input_was_sc,
-                });
+                }));
             }
         }
         CacheResult::Miss
@@ -285,6 +289,10 @@ fn fast_key(file_path: &str, params: &ScanParams) -> String {
     hasher.update(params.content_type.as_bytes());
     hasher.update(b"\0");
     hasher.update(params.fix_mode.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(if params.detect_ai { b"ai" } else { b"" });
+    hasher.update(b"\0");
+    hasher.update(params.ai_threshold.as_bytes());
     hasher.finalize().to_hex()[..32].to_string()
 }
 
@@ -339,6 +347,7 @@ mod tests {
         ScanOutput {
             issues: vec![],
             detected_script: ChineseType::Traditional,
+            ai_signature: None,
         }
     }
 
@@ -348,6 +357,8 @@ mod tests {
             profile: "default".into(),
             content_type: "md".into(),
             fix_mode: "none".into(),
+            detect_ai: false,
+            ai_threshold: "1.0".into(),
         }
     }
 
@@ -357,6 +368,8 @@ mod tests {
             profile: "default".into(),
             content_type: "plain".into(),
             fix_mode: "none".into(),
+            detect_ai: false,
+            ai_threshold: "1.0".into(),
         }
     }
 
@@ -393,6 +406,70 @@ mod tests {
         };
         assert!(matches!(
             cache.check_fast("a.md", 1000, 5, &strict),
+            CacheResult::Miss
+        ));
+    }
+
+    #[test]
+    fn detect_ai_changes_cache_key() {
+        let dir = TempDir::new().unwrap();
+        let mut cache = ScanCache::open(dir.path().join("c.bin"));
+        let p = test_params();
+
+        cache.put("a.md", b"hello", 1000, 5, &p, empty_output(), false);
+
+        // Same params with detect_ai=false: hit.
+        assert!(matches!(
+            cache.check_fast("a.md", 1000, 5, &p),
+            CacheResult::Hit(_)
+        ));
+
+        // Same file + mtime + size but detect_ai=true: miss (different key).
+        let p_ai = ScanParams {
+            detect_ai: true,
+            ..p.clone()
+        };
+        assert!(matches!(
+            cache.check_fast("a.md", 1000, 5, &p_ai),
+            CacheResult::Miss
+        ));
+    }
+
+    #[test]
+    fn ai_threshold_changes_cache_key() {
+        let dir = TempDir::new().unwrap();
+        let mut cache = ScanCache::open(dir.path().join("c.bin"));
+        let p = ScanParams {
+            detect_ai: true,
+            ai_threshold: "1.0".into(),
+            ..test_params()
+        };
+
+        cache.put("a.md", b"hello", 1000, 5, &p, empty_output(), false);
+
+        // Same threshold: hit.
+        assert!(matches!(
+            cache.check_fast("a.md", 1000, 5, &p),
+            CacheResult::Hit(_)
+        ));
+
+        // Different threshold (low sensitivity): miss.
+        let p_low = ScanParams {
+            ai_threshold: "0.5".into(),
+            ..p.clone()
+        };
+        assert!(matches!(
+            cache.check_fast("a.md", 1000, 5, &p_low),
+            CacheResult::Miss
+        ));
+
+        // Different threshold (high sensitivity): also miss.
+        let p_high = ScanParams {
+            ai_threshold: "1.5".into(),
+            ..p.clone()
+        };
+        assert!(matches!(
+            cache.check_fast("a.md", 1000, 5, &p_high),
             CacheResult::Miss
         ));
     }

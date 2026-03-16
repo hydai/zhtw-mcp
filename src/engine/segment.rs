@@ -2,7 +2,7 @@
 //
 // Scope: word boundaries only — NOT a full Chinese NLP toolkit. No POS
 // tagging, no parsing. Designed for heuristic analysis in dunhao detection
-// (2.3), ambiguity resolution (4.3), and variant context awareness (3.1).
+// dunhao detection, ambiguity resolution, and variant context awareness.
 //
 // Algorithm: MMSEG (Chih-Hao Tsai, 1996) 4-rule chunk scoring.
 // At each position, generate candidate 3-word chunks (up to max_word_len
@@ -892,7 +892,7 @@ mod tests {
         assert!(!token_contains_clue("下拉", "下拉菜單"));
     }
 
-    // --- General vocabulary supplement (17.2) tests ---
+    // --- General vocabulary supplement tests ---
 
     /// General vocab is included in from_rules() dict.
     #[test]

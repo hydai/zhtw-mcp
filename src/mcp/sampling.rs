@@ -176,7 +176,7 @@ impl<'a> SamplingBridge<'a> {
         })
     }
 
-    /// Send a bulk anchor-confirmation request for multiple terms at once (32.6).
+    /// Send a bulk anchor-confirmation request for multiple terms at once.
     ///
     /// Sends a single `sampling/createMessage` with indexed terms as a JSON array.
     /// Asks the LLM to return a JSON object mapping each index to true/false.

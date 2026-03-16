@@ -40,6 +40,7 @@ VALID_RULE_TYPES = {
     "typo",
     "confusable",
     "political_coloring",
+    "ai_filler",
 }
 
 # All known spelling rule fields (anything else is an unknown key warning).
@@ -457,9 +458,12 @@ def detect_conflicts(spelling_rules: list[dict[str, Any]]) -> list[str]:
                     stack.append((target, path + [target]))
 
     # 2. Empty to requires non-empty english (use English form convention).
+    #    Exception: ai_filler rules use empty to intentionally (deletion).
     for rule in from_set.values():
         targets = [t for t in rule.get("to", []) if t]
         if not targets:
+            if rule.get("type") == "ai_filler":
+                continue
             english = rule.get("english", "")
             if not english:
                 warnings.append(

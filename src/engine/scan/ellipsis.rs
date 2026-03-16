@@ -1,4 +1,4 @@
-// Ellipsis normalization (9.3).
+// Ellipsis normalization.
 //
 // Detects non-standard ellipsis patterns adjacent to CJK text and suggests
 // the MoE-standard …… (two U+2026 HORIZONTAL ELLIPSIS characters).
@@ -8,7 +8,7 @@ use crate::rules::ruleset::{Issue, Severity};
 
 use super::{adjacent_cjk, punct_issue_sev};
 
-/// Ellipsis normalization (9.3).
+/// Ellipsis normalization.
 ///
 /// Detects non-standard ellipsis patterns adjacent to CJK text and suggests
 /// the MoE-standard …… (two U+2026 HORIZONTAL ELLIPSIS characters).

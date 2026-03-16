@@ -803,3 +803,52 @@ fn cli_lint_fix_bogus_rejected() {
         "should report unknown fix mode, got: {stderr}"
     );
 }
+
+#[test]
+fn cli_lint_detect_ai_enables_density_detection() {
+    // Build text with high density of a tracked phrase.
+    let filler = "這是正常的技術內容段落。";
+    let mut text = String::new();
+    for i in 0..100 {
+        if i % 20 == 0 {
+            text.push_str("更重要的是，我們需要重新評估這個方案。");
+        } else {
+            text.push_str(filler);
+        }
+    }
+    // Without --detect-ai (default profile): no ai_style density issues.
+    let output_default = run_lint_stdin(&["--format", "json"], &text);
+    let stdout = String::from_utf8_lossy(&output_default.stdout);
+    let json_default: serde_json::Value =
+        serde_json::from_str(&stdout).expect("default output should be valid JSON");
+    let has_ai_density_default = json_default["issues"].as_array().map_or(false, |arr| {
+        arr.iter().any(|i| {
+            i["rule_type"] == "ai_style"
+                && i["context"]
+                    .as_str()
+                    .map_or(false, |c| c.contains("次/千字"))
+        })
+    });
+    assert!(
+        !has_ai_density_default,
+        "default profile should not report ai_style density issues: {stdout}"
+    );
+
+    // With --detect-ai: ai_style density issues should appear.
+    let output_ai = run_lint_stdin(&["--detect-ai", "--format", "json"], &text);
+    let stdout_ai = String::from_utf8_lossy(&output_ai.stdout);
+    let json_ai: serde_json::Value =
+        serde_json::from_str(&stdout_ai).expect("--detect-ai output should be valid JSON");
+    let has_ai_density = json_ai["issues"].as_array().map_or(false, |arr| {
+        arr.iter().any(|i| {
+            i["rule_type"] == "ai_style"
+                && i["context"]
+                    .as_str()
+                    .map_or(false, |c| c.contains("次/千字"))
+        })
+    });
+    assert!(
+        has_ai_density,
+        "--detect-ai should report ai_style density issues: {stdout_ai}"
+    );
+}

@@ -171,10 +171,26 @@ pub fn apply_fixes_with_context(
         // Orthographic issue types can be fixed mechanically (no lexical
         // ambiguity).  Lexical types (CrossStrait, Typo, PoliticalColoring,
         // Confusable) need progressively higher fix tiers.
+        // AiStyle zero-width artifact removal (empty suggestion on invisible
+        // chars only) is safe for orthographic tier -- deletes invisible junk.
+        // The found-content check prevents future AiStyle rules with empty
+        // suggestions from being misclassified as orthographic.
+        // Narrower check than ai_score::is_zero_width: only ZWSP (U+200B)
+        // and mid-text BOM (U+FEFF) are pure tokenizer junk safe to strip
+        // unconditionally. ZWJ/ZWNJ/LRM/RLM have legitimate uses in bidi
+        // text and emoji sequences; the broader set in ai_score.rs is
+        // appropriate for detection/scoring but too aggressive for fixing.
+        let ai_zero_width_removal = issue.rule_type == IssueType::AiStyle
+            && issue.suggestions.len() == 1
+            && issue.suggestions[0].is_empty()
+            && !issue.found.is_empty()
+            && issue.found.chars().all(|ch| {
+                ch == '\u{200B}' || (ch == '\u{FEFF}' && issue.offset > 0) // preserve file-start BOM
+            });
         let orthographic = matches!(
             issue.rule_type,
             IssueType::Punctuation | IssueType::Case | IssueType::Variant | IssueType::Grammar
-        );
+        ) || ai_zero_width_removal;
 
         // Orthographic tier: skip all lexical issues.
         if mode == FixMode::Orthographic && !orthographic {
@@ -609,6 +625,51 @@ mod tests {
         )];
         let result = apply_fixes(text, &issues, FixMode::LexicalContextual, &[]);
         assert_eq!(result.text, text); // unchanged -- no segmenter, cannot verify clues
+        assert_eq!(result.skipped, 1);
+    }
+
+    // -- AiStyle tier exclusion tests --
+
+    fn make_ai_style_issue(offset: usize, found: &str, suggestions: Vec<&str>) -> Issue {
+        Issue::new(
+            offset,
+            found.len(),
+            found,
+            suggestions.into_iter().map(String::from).collect(),
+            IssueType::AiStyle,
+            Severity::Info,
+        )
+    }
+
+    #[test]
+    fn orthographic_skips_ai_style_issues() {
+        let text = "這個系統作為核心元件";
+        let offset = text.find("作為").unwrap();
+        let issues = vec![make_ai_style_issue(offset, "作為", vec!["是"])];
+        let result = apply_fixes(text, &issues, FixMode::Orthographic, &[]);
+        assert_eq!(result.text, text); // unchanged — AiStyle not orthographic
+        assert_eq!(result.skipped, 1);
+    }
+
+    #[test]
+    fn lexical_safe_applies_single_suggestion_ai_style() {
+        // Semantic safety words (意味著→表示) have a single suggestion
+        // and are eligible for lexical_safe auto-fix.
+        let text = "這個定義意味著所有值";
+        let offset = text.find("意味著").unwrap();
+        let issues = vec![make_ai_style_issue(offset, "意味著", vec!["表示"])];
+        let result = apply_fixes(text, &issues, FixMode::LexicalSafe, &[]);
+        assert_eq!(result.text, "這個定義表示所有值");
+        assert_eq!(result.applied, 1);
+    }
+
+    #[test]
+    fn lexical_safe_skips_ai_style_no_suggestions() {
+        let text = "這意味著很多事情";
+        let offset = text.find("意味著").unwrap();
+        let issues = vec![make_ai_style_issue(offset, "意味著", vec![])];
+        let result = apply_fixes(text, &issues, FixMode::LexicalSafe, &[]);
+        assert_eq!(result.text, text); // unchanged — no suggestion
         assert_eq!(result.skipped, 1);
     }
 
