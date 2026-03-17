@@ -130,6 +130,12 @@ impl Scanner {
             return;
         }
 
+        // AI filler rules are profile-gated: only fire when ai_filler_detection
+        // is enabled (de_ai / strict_moe profiles).
+        if rule.rule_type == RuleType::AiFiller && !cfg.ai_filler_detection {
+            return;
+        }
+
         // Political stance filtering: suppress political_coloring rules
         // based on the active stance sub-profile.
         if rule.rule_type == RuleType::PoliticalColoring

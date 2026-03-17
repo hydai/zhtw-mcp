@@ -307,18 +307,47 @@ impl Server {
         let verify = parse_verify(args);
 
         let stance_name = stance.unwrap_or(PoliticalStance::RocCentric).name();
+        let detect_ai = args
+            .get("detect_ai")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let ai_threshold = args.get("ai_threshold").and_then(|v| v.as_str());
+
+        // Build effective config: profile base + stance override + detect_ai override.
+        let mut cfg = profile.config();
+        if let Some(st) = stance {
+            cfg = cfg.with_stance(st);
+        }
+        if detect_ai {
+            cfg.ai_filler_detection = true;
+            cfg.ai_semantic_safety = true;
+            cfg.ai_density_detection = true;
+            cfg.ai_structural_patterns = true;
+            // Apply threshold level: low=0.5 (sensitive), medium=1.0, high=1.5 (conservative).
+            cfg.ai_threshold_multiplier = match ai_threshold {
+                Some("low") => 0.5,
+                Some("medium") | None => 1.0,
+                Some("high") => 1.5,
+                Some(other) => {
+                    return CallToolResult::error(format!(
+                        "invalid ai_threshold: '{other}'. Expected: low, medium, high"
+                    ));
+                }
+            };
+        }
 
         match fix_mode {
             FixMode::None => {
                 // Lint-only path.
-                let output = self
-                    .scanner
-                    .scan_for_content_type(text, content_type, profile);
+                let output =
+                    self.scanner
+                        .scan_for_content_type_with_config(text, content_type, cfg);
                 let detected_script = if s2t_converted.is_some() {
                     "simplified"
                 } else {
                     output.detected_script.name()
                 };
+                let ai_signature = output.ai_signature;
                 let mut issues = output.issues;
                 if let Some(st) = stance {
                     filter_by_stance(&mut issues, st);
@@ -359,16 +388,17 @@ impl Server {
                     fix_records: &[],
                     #[cfg(feature = "translate")]
                     calibrate_result,
+                    ai_signature: ai_signature.as_ref(),
                 })
             }
 
             mode @ (FixMode::Orthographic | FixMode::LexicalSafe | FixMode::LexicalContextual) => {
                 // Fix path: scan, apply fixes, re-scan for residual issues.
                 let excluded = build_exclusions_for_content_type(text, content_type);
-                let scan_out = self.scanner.scan_with_prebuilt_excluded(
+                let scan_out = self.scanner.scan_with_prebuilt_excluded_config(
                     text,
                     &excluded,
-                    profile,
+                    cfg,
                     content_type,
                 );
                 let detected_script = if s2t_converted.is_some() {
@@ -431,11 +461,14 @@ impl Server {
                     Some(self.scanner.segmenter()),
                 );
 
-                // Re-scan after fixes.
-                let mut remaining_issues = self
-                    .scanner
-                    .scan_for_content_type(&fix_result.text, content_type, profile)
-                    .issues;
+                // Re-scan after fixes — use post-fix ai_signature, not pre-fix.
+                let rescan_out = self.scanner.scan_for_content_type_with_config(
+                    &fix_result.text,
+                    content_type,
+                    cfg,
+                );
+                let ai_signature = rescan_out.ai_signature;
+                let mut remaining_issues = rescan_out.issues;
                 if let Some(st) = stance {
                     filter_by_stance(&mut remaining_issues, st);
                 }
@@ -498,6 +531,7 @@ impl Server {
                     fix_records: &fix_result.applied_fixes,
                     #[cfg(feature = "translate")]
                     calibrate_result,
+                    ai_signature: ai_signature.as_ref(),
                 })
             }
         }
@@ -645,7 +679,7 @@ fn parse_profile(args: &Value) -> Result<Profile, CallToolResult> {
         None => Ok(Profile::Default),
         Some(s) => Profile::from_str_strict(s).ok_or_else(|| {
             CallToolResult::error(format!(
-                "invalid 'profile': '{s}' (expected 'default', 'strict_moe', or 'ui_strings')"
+                "invalid 'profile': '{s}' (expected 'default', 'strict_moe', 'ui_strings', or 'editorial')"
             ))
         }),
     }
@@ -713,6 +747,10 @@ enum OutputMode {
     /// Eliminates JSON syntax tax (repeated keys, braces, quotes) that
     /// inflates BPE token count by 40-60% with zero semantic value.
     Tabular,
+    /// AI summary only: issue counts + AI signature report.
+    /// No individual issues, no text. Lets downstream tools quickly
+    /// decide whether to trigger a full review.
+    Summary,
 }
 
 /// Parse the optional "output" mode from tool arguments.
@@ -723,9 +761,10 @@ fn parse_output_mode(args: &Value, default: OutputMode) -> Result<OutputMode, Ca
         Some("compact") => Ok(OutputMode::Compact),
         Some("full") => Ok(OutputMode::Full),
         Some("tabular") => Ok(OutputMode::Tabular),
+        Some("summary") => Ok(OutputMode::Summary),
         None => Ok(default),
         Some(other) => Err(CallToolResult::error(format!(
-            "invalid 'output': '{other}' (expected 'full', 'compact', or 'tabular')"
+            "invalid 'output': '{other}' (expected 'full', 'compact', 'tabular', or 'summary')"
         ))),
     }
 }
@@ -868,11 +907,22 @@ fn build_explanation(issue: &Issue) -> Option<String> {
                 ));
             }
         }
+        IssueType::AiStyle => {
+            if let Some(ctx) = &issue.context {
+                parts.push(format!("'{}' — {}.", issue.found, ctx));
+            }
+            if !issue.suggestions.is_empty() {
+                let sugg = issue.suggestions.join(" / ");
+                parts.push(format!("Suggested: {sugg}."));
+            } else {
+                parts.push("Consider removing or rephrasing.".to_string());
+            }
+        }
     }
 
-    // Grammar issues already embed context in the main explanation;
+    // Grammar and AiStyle issues already embed context in the main explanation;
     // skip the shared Context: append to avoid duplication.
-    if issue.rule_type != IssueType::Grammar {
+    if !matches!(issue.rule_type, IssueType::Grammar | IssueType::AiStyle) {
         if let Some(ctx) = &issue.context {
             parts.push(format!("Context: {ctx}"));
         }
@@ -1009,6 +1059,8 @@ struct FullOutput<'a> {
     #[cfg(feature = "translate")]
     #[serde(skip_serializing_if = "Option::is_none")]
     verify: Option<VerifyStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ai_signature: Option<&'a crate::engine::ai_score::AiSignatureReport>,
 }
 
 /// Compact tool response (serialized directly, no intermediate Value).
@@ -1031,6 +1083,20 @@ struct CompactOutput<'a> {
     #[cfg(feature = "translate")]
     #[serde(skip_serializing_if = "Option::is_none")]
     verify: Option<VerifyStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ai_signature: Option<&'a crate::engine::ai_score::AiSignatureReport>,
+}
+
+/// Summary-only output: issue counts + AI signature, no individual issues or text.
+#[derive(Serialize)]
+struct SummaryOutput<'a> {
+    accepted: bool,
+    summary: &'a IssueSummary,
+    gate: GateInfo,
+    profile: &'a str,
+    detected_script: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ai_signature: Option<&'a crate::engine::ai_score::AiSignatureReport>,
 }
 
 /// Count issues by severity.
@@ -1074,6 +1140,7 @@ struct CheckOutputParams<'a> {
     fix_records: &'a [crate::fixer::AppliedFix],
     #[cfg(feature = "translate")]
     calibrate_result: Option<crate::engine::translate::CalibrateResult>,
+    ai_signature: Option<&'a crate::engine::ai_score::AiSignatureReport>,
 }
 
 /// Build the unified zhtw JSON response and wrap it in a CallToolResult.
@@ -1152,6 +1219,7 @@ fn build_check_output(params: &CheckOutputParams<'_>) -> CallToolResult {
                 fix_output_mode: fix_mode_label,
                 #[cfg(feature = "translate")]
                 verify,
+                ai_signature: params.ai_signature,
             };
             serialize_output(&output)
         }
@@ -1174,6 +1242,7 @@ fn build_check_output(params: &CheckOutputParams<'_>) -> CallToolResult {
                 fix_output_mode: fix_mode_label,
                 #[cfg(feature = "translate")]
                 verify,
+                ai_signature: params.ai_signature,
             };
             serialize_output(&output)
         }
@@ -1189,6 +1258,17 @@ fn build_check_output(params: &CheckOutputParams<'_>) -> CallToolResult {
                 fix_mode_label,
             );
             Ok(tsv)
+        }
+        OutputMode::Summary => {
+            let output = SummaryOutput {
+                accepted,
+                summary: &summary,
+                gate,
+                profile: params.profile.name(),
+                detected_script: params.detected_script,
+                ai_signature: params.ai_signature,
+            };
+            serialize_output(&output)
         }
     };
 
@@ -1614,7 +1694,7 @@ fn tool_definitions() -> Vec<ToolDef> {
             props.insert("max_warnings".into(), json!({ "type": "integer" }));
             props.insert("profile".into(), json!({
                 "type": "string",
-                "enum": ["default", "strict_moe", "ui_strings"]
+                "enum": ["default", "strict_moe", "ui_strings", "editorial"]
             }));
             props.insert("content_type".into(), json!({
                 "type": "string",
@@ -1641,7 +1721,17 @@ fn tool_definitions() -> Vec<ToolDef> {
             }));
             props.insert("output".into(), json!({
                 "type": "string",
-                "enum": ["full", "compact", "tabular"]
+                "enum": ["full", "compact", "tabular", "summary"],
+                "description": "Output mode. 'summary' returns only issue counts + AI signature (no individual issues)"
+            }));
+            props.insert("detect_ai".into(), json!({
+                "type": "boolean",
+                "description": "Enable AI writing artifact detection (density + grammar patterns) regardless of profile"
+            }));
+            props.insert("ai_threshold".into(), json!({
+                "type": "string",
+                "enum": ["low", "medium", "high"],
+                "description": "AI detection sensitivity: 'low' (sensitive, catches more), 'medium' (balanced), 'high' (conservative). Only effective with detect_ai=true"
             }));
             json!({
                 "type": "object",

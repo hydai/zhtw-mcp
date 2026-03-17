@@ -56,6 +56,11 @@ use self::quotes::{fix_quote_pairing, validate_quote_hierarchy};
 pub struct ScanOutput {
     pub issues: Vec<Issue>,
     pub detected_script: ChineseType,
+    /// AI writing signature report.  Present only when AI scoring is
+    /// requested (editorial profile or explicit detect_ai/ai_score).
+    /// Note: no skip_serializing_if — bincode requires all fields present.
+    #[serde(default)]
+    pub ai_signature: Option<crate::engine::ai_score::AiSignatureReport>,
 }
 
 /// Content type for determining exclusion strategy.
@@ -410,7 +415,7 @@ fn punct_issue(offset: usize, found: &str, suggestion: &str, context: &str) -> I
 ///
 /// Combines content-pattern exclusions (URLs, paths, mentions) with
 /// structural exclusions appropriate to the content type and inline
-/// suppression markers.  Shared between CLI and MCP pipelines (20.4).
+/// suppression markers.  Shared between CLI and MCP pipelines.
 pub fn build_exclusions_for_content_type(text: &str, content_type: ContentType) -> Vec<ByteRange> {
     let mut excluded = build_excluded_ranges(text);
     match content_type {
@@ -716,7 +721,7 @@ impl Scanner {
         } else {
             ContentType::Plain
         };
-        self.scan_nfc_with_content_type(text, None, profile, content_type)
+        self.scan_nfc_with_content_type(text, None, profile.config(), content_type)
     }
 
     /// Scan YAML text with key-token exclusion.
@@ -725,7 +730,7 @@ impl Scanner {
     /// in key-value separators do not trigger false-positive colon warnings.
     /// YAML values after the colon are scanned normally as prose.
     pub fn scan_profiled_yaml(&self, text: &str, profile: Profile) -> ScanOutput {
-        self.scan_nfc_with_content_type(text, None, profile, ContentType::Yaml)
+        self.scan_nfc_with_content_type(text, None, profile.config(), ContentType::Yaml)
     }
 
     /// Scan with NFC normalization, reusing pre-built excluded ranges.
@@ -744,7 +749,18 @@ impl Scanner {
         profile: Profile,
         content_type: ContentType,
     ) -> ScanOutput {
-        self.scan_nfc_with_content_type(text, Some(excluded), profile, content_type)
+        self.scan_nfc_with_content_type(text, Some(excluded), profile.config(), content_type)
+    }
+
+    /// Like scan_with_prebuilt_excluded but with explicit ProfileConfig.
+    pub fn scan_with_prebuilt_excluded_config(
+        &self,
+        text: &str,
+        excluded: &[ByteRange],
+        cfg: ProfileConfig,
+        content_type: ContentType,
+    ) -> ScanOutput {
+        self.scan_nfc_with_content_type(text, Some(excluded), cfg, content_type)
     }
 
     /// Scan text using the content-type-aware exclusion strategy.
@@ -757,31 +773,38 @@ impl Scanner {
         content_type: ContentType,
         profile: Profile,
     ) -> ScanOutput {
-        self.scan_nfc_with_content_type(text, None, profile, content_type)
+        self.scan_nfc_with_content_type(text, None, profile.config(), content_type)
+    }
+
+    /// Scan with content-type-aware exclusions and explicit ProfileConfig.
+    /// Use this when the caller needs to override individual config flags
+    /// (e.g. detect_ai enabling density detection on a non-editorial profile).
+    pub fn scan_for_content_type_with_config(
+        &self,
+        text: &str,
+        content_type: ContentType,
+        cfg: ProfileConfig,
+    ) -> ScanOutput {
+        self.scan_nfc_with_content_type(text, None, cfg, content_type)
     }
 
     /// Core NFC-normalize → build exclusions → scan → remap pipeline.
-    ///
-    /// When `prebuilt_excluded` is Some and the text is already NFC, reuses
-    /// the caller's exclusion ranges. Otherwise builds fresh exclusions
-    /// appropriate to the content type.
     fn scan_nfc_with_content_type(
         &self,
         text: &str,
         prebuilt_excluded: Option<&[ByteRange]>,
-        profile: Profile,
+        cfg: ProfileConfig,
         content_type: ContentType,
     ) -> ScanOutput {
         let norm = normalize_nfc(text);
         let scan_text = &norm.text;
         let nfc_changed = !norm.offset_map.is_empty();
 
-        // Reuse prebuilt exclusions only when NFC didn't shift byte offsets.
         let mut output = match prebuilt_excluded {
-            Some(excl) if !nfc_changed => self.scan_with_excluded(scan_text, excl, profile),
+            Some(excl) if !nfc_changed => self.scan_with_config(scan_text, excl, cfg),
             _ => {
                 let excl = build_exclusions_for_content_type(scan_text, content_type);
-                self.scan_with_excluded(scan_text, &excl, profile)
+                self.scan_with_config(scan_text, &excl, cfg)
             }
         };
 
@@ -821,6 +844,7 @@ impl Scanner {
             return ScanOutput {
                 issues: Vec::new(),
                 detected_script: ChineseType::Unknown,
+                ai_signature: None,
             };
         }
 
@@ -867,21 +891,59 @@ impl Scanner {
             grammar::scan_grammar(text, excluded, &mut issues);
         }
 
-        // Fix CN quotation mark pairing with depth-based nesting (2.4):
+        // AI writing detection grammar checks: semantic safety words,
+        // copula avoidance, passive voice overuse.  Separate from base grammar
+        // checks — gated by ai_semantic_safety profile flag.
+        if cfg.ai_semantic_safety {
+            grammar::scan_ai_grammar(text, excluded, &mut issues);
+        }
+
+        // Structural AI pattern detection: binary contrast density,
+        // paragraph endings, dash overuse, formulaic headings, list density.
+        if cfg.ai_structural_patterns {
+            grammar::scan_ai_structural(text, excluded, &mut issues, cfg.ai_threshold_multiplier);
+        }
+
+        // Density-based AI phrase detection: post-scan frequency pass counts
+        // tracked phrases across the full document and flags when density
+        // exceeds per-phrase thresholds.  Distinct from per-occurrence filler
+        // detection — catches the statistical signature of AI writing.
+        if cfg.ai_density_detection {
+            grammar::scan_ai_density(text, excluded, &mut issues, cfg.ai_threshold_multiplier);
+        }
+
+        // Fix CN quotation mark pairing with depth-based nesting:
         // well-formed quotes use character-based depth tracking; misordered
         // or all-same-char quotes fall back to positional alternation.
         // Paragraph breaks reset nesting depth.
         fix_quote_pairing(text, &mut issues);
 
-        // Validate structural nesting of existing TW bracket quotes (12.1):
+        // Validate structural nesting of existing TW bracket quotes:
         // checks for mismatched, interleaved, and unclosed quotes per paragraph.
         validate_quote_hierarchy(text, excluded, &mut issues);
+
+        // Compute AI signature score when any AI detection flag is active.
+        let ai_signature = if cfg.ai_filler_detection
+            || cfg.ai_semantic_safety
+            || cfg.ai_density_detection
+            || cfg.ai_structural_patterns
+        {
+            crate::engine::ai_score::compute_ai_score(
+                text,
+                &issues,
+                excluded,
+                cfg.ai_threshold_multiplier,
+            )
+        } else {
+            None
+        };
 
         // Skip O(n) line index construction when no issues found (common case).
         if issues.is_empty() {
             return ScanOutput {
                 issues,
                 detected_script: zh_type,
+                ai_signature,
             };
         }
 
@@ -893,7 +955,7 @@ impl Scanner {
             issue.col = col;
         }
 
-        // Deterministic output contract (1.7): issues are sorted by byte offset
+        // Deterministic output contract: issues are sorted by byte offset
         // ascending, then severity descending, then rule_type discriminant for
         // stable, diffable output.
         issues.sort_by(|a, b| {
@@ -906,6 +968,7 @@ impl Scanner {
         ScanOutput {
             issues,
             detected_script: zh_type,
+            ai_signature,
         }
     }
 }

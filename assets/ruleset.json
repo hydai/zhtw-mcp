@@ -139,6 +139,24 @@
       "english": "download file"
     },
     {
+      "from": "不容忽視",
+      "to": [],
+      "type": "ai_filler",
+      "context": "AI filler phrase (不容忽視); flag as potential filler but do not auto-delete — it is a content-bearing predicate"
+    },
+    {
+      "from": "不容忽視的是",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "AI filler phrase; delete"
+    },
+    {
+      "from": "不容忽視的是，",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "AI filler phrase; delete"
+    },
+    {
       "from": "並口",
       "to": ["平行埠"],
       "type": "cross_strait",
@@ -604,6 +622,42 @@
       "english": "debit card"
     },
     {
+      "from": "值得一提的是",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "AI filler phrase with zero information content; delete"
+    },
+    {
+      "from": "值得一提的是，",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "AI filler phrase with zero information content; delete"
+    },
+    {
+      "from": "值得一提的是：",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "AI filler phrase with zero information content; delete"
+    },
+    {
+      "from": "值得注意的是",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "AI filler phrase with zero information content; delete"
+    },
+    {
+      "from": "值得注意的是，",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "AI filler phrase with zero information content; delete"
+    },
+    {
+      "from": "值得注意的是：",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "AI filler phrase with zero information content; delete"
+    },
+    {
       "from": "健壯",
       "to": ["強固", "穩健"],
       "type": "cross_strait",
@@ -668,6 +722,18 @@
       "to": ["儀表板"],
       "type": "cross_strait",
       "english": "dashboard"
+    },
+    {
+      "from": "儘管存在這些挑戰",
+      "to": [],
+      "type": "ai_filler",
+      "context": "Formulaic AI concession phrase; flag but do not auto-delete — it carries contrast meaning that requires rewriting, not deletion"
+    },
+    {
+      "from": "儘管存在這些挑戰，",
+      "to": [],
+      "type": "ai_filler",
+      "context": "Formulaic AI concession phrase; flag but do not auto-delete — it carries contrast meaning that requires rewriting, not deletion"
     },
     {
       "from": "優先級",
@@ -1476,6 +1542,13 @@
       "english": "read-only"
     },
     {
+      "from": "可以看到",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "AI filler phrase (可以看到); delete or rephrase",
+      "context_clues": ["系統", "程式", "功能", "架構", "方法"]
+    },
+    {
       "from": "可行函數",
       "to": ["可行函式"],
       "type": "cross_strait",
@@ -1695,6 +1768,12 @@
       "english": "Enter key/carriage return"
     },
     {
+      "from": "因此我們可以看到",
+      "to": ["因此"],
+      "type": "ai_filler",
+      "context": "AI filler phrase; simplify to 因此"
+    },
+    {
       "from": "固件",
       "to": ["韌體"],
       "type": "cross_strait",
@@ -1782,10 +1861,40 @@
       "english": "potato"
     },
     {
+      "from": "在某種程度上",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "AI hedging phrase (在某種程度上); delete or be specific"
+    },
+    {
       "from": "在線",
       "to": ["線上"],
       "type": "cross_strait",
       "english": "online"
+    },
+    {
+      "from": "在這個過程中",
+      "to": ["過程中"],
+      "type": "ai_filler",
+      "context": "AI filler phrase; simplify to 過程中"
+    },
+    {
+      "from": "在這個過程中，",
+      "to": ["過程中，"],
+      "type": "ai_filler",
+      "context": "AI filler phrase; simplify to 過程中"
+    },
+    {
+      "from": "在這種情況下",
+      "to": [],
+      "type": "ai_filler",
+      "context": "AI filler phrase; flag but do not auto-fix — 此時 is temporal while the original is conditional, changing meaning"
+    },
+    {
+      "from": "在這種情況下，",
+      "to": [],
+      "type": "ai_filler",
+      "context": "AI filler phrase; flag but do not auto-fix — 此時 is temporal while the original is conditional, changing meaning"
     },
     {
       "from": "圭亞那",
@@ -2697,6 +2806,12 @@
       "english": "suffix"
     },
     {
+      "from": "從某種角度來看",
+      "to": [],
+      "type": "ai_filler",
+      "context": "AI hedging phrase (從某種角度來看); flag but do not auto-delete — it is a semantic hedge that may carry intended meaning"
+    },
+    {
       "from": "循環",
       "to": ["迴圈"],
       "type": "confusable",
@@ -3462,6 +3577,18 @@
       "english": "smartphone"
     },
     {
+      "from": "更重要的是",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "AI transition filler phrase; delete or rephrase"
+    },
+    {
+      "from": "更重要的是，",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "AI transition filler phrase; delete or rephrase"
+    },
+    {
       "from": "最底層派生類",
       "to": ["最末層衍生類別"],
       "type": "cross_strait",
@@ -3975,6 +4102,12 @@
       "to": ["冷盤"],
       "type": "cross_strait",
       "english": "cold dish/appetizer"
+    },
+    {
+      "from": "深刻影響",
+      "to": [],
+      "type": "ai_filler",
+      "context": "AI pattern indicator (深刻影響); flag but do not auto-fix — 深刻 encodes intensity that 影響 alone drops"
     },
     {
       "from": "添加",
@@ -5170,10 +5303,29 @@
       "english": "indent"
     },
     {
+      "from": "總的來說",
+      "to": ["總之"],
+      "type": "ai_filler",
+      "context": "AI summary filler (cn calque 总的来说); tw prefers 總之"
+    },
+    {
+      "from": "總的來說，",
+      "to": ["總之，"],
+      "type": "ai_filler",
+      "context": "AI summary filler (cn calque 总的来说); tw prefers 總之"
+    },
+    {
       "from": "總線",
       "to": ["匯流排"],
       "type": "cross_strait",
       "english": "bus"
+    },
+    {
+      "from": "總而言之，",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "AI summary filler; often redundant — delete or keep only if genuinely concluding",
+      "context_clues": ["系統", "程式", "功能", "架構", "方法"]
     },
     {
       "from": "繮",
@@ -6579,6 +6731,24 @@
       "to": ["電池芯"],
       "type": "cross_strait",
       "english": "battery cell"
+    },
+    {
+      "from": "需要注意的是",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "AI filler phrase with zero information content; delete"
+    },
+    {
+      "from": "需要注意的是，",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "AI filler phrase with zero information content; delete"
+    },
+    {
+      "from": "需要注意的是：",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "AI filler phrase with zero information content; delete"
     },
     {
       "from": "靈活性",

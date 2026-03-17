@@ -4,13 +4,20 @@ use serde::{Deserialize, Serialize};
 ///
 /// Default is the baseline (current behavior). StrictMoe enables the full
 /// Ministry of Education standard (variants, colon, 臺). UiStrings is
-/// relaxed for software UI contexts (half-width : allowed).
+/// relaxed for software UI contexts (half-width : allowed). Editorial
+/// enables AI writing artifact detection (filler phrases, semantic safety
+/// words, copula avoidance, passive voice overuse) on top of base rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Profile {
     Default,
     StrictMoe,
     UiStrings,
+    /// Editorial review: base rules + AI writing artifact detection.
+    /// Flags discourse-level patterns statistically overrepresented in
+    /// LLM-generated zh-TW text (filler phrases, semantic safety words,
+    /// inflated copulas, passive voice overuse).
+    Editorial,
 }
 
 /// Processing chain configuration for a profile.
@@ -40,6 +47,22 @@ pub struct ProfileConfig {
     pub range_en_dash: bool,
     /// Enable grammar checks (interlingual transfer, A-not-A + 嗎 clash).
     pub grammar_checks: bool,
+    /// Enable AI filler phrase detection (值得注意的是, 在這種情況下, etc.).
+    pub ai_filler_detection: bool,
+    /// Enable AI semantic safety word detection (意味著 disambiguation,
+    /// copula avoidance, passive voice overuse).
+    pub ai_semantic_safety: bool,
+    /// Enable density-based AI phrase detection.  Counts tracked phrases
+    /// across the full document and flags when density exceeds per-phrase
+    /// thresholds (count per thousand characters).
+    pub ai_density_detection: bool,
+    /// Enable structural AI pattern detection: binary contrast density,
+    /// paragraph-ending declarations, dash overuse, formulaic headings.
+    pub ai_structural_patterns: bool,
+    /// AI detection threshold multiplier: <1.0 = sensitive (catches more),
+    /// 1.0 = balanced (default), >1.0 = conservative (fewer false positives).
+    /// Maps to ai_threshold levels: low=0.5, medium=1.0, high=1.5.
+    pub ai_threshold_multiplier: f32,
     /// Political stance sub-profile. Controls which PoliticalColoring rules fire.
     pub political_stance: PoliticalStance,
 }
@@ -54,7 +77,12 @@ impl ProfileConfig {
 
 impl Profile {
     /// All defined profiles.
-    pub const ALL: &'static [Profile] = &[Profile::Default, Profile::StrictMoe, Profile::UiStrings];
+    pub const ALL: &'static [Profile] = &[
+        Profile::Default,
+        Profile::StrictMoe,
+        Profile::UiStrings,
+        Profile::Editorial,
+    ];
 
     /// Human-readable name.
     pub fn name(self) -> &'static str {
@@ -62,6 +90,7 @@ impl Profile {
             Profile::Default => "default",
             Profile::StrictMoe => "strict_moe",
             Profile::UiStrings => "ui_strings",
+            Profile::Editorial => "editorial",
         }
     }
 
@@ -71,6 +100,7 @@ impl Profile {
             Profile::Default => "Base zh-TW rules: cross-strait vocabulary, political coloring, casing, basic punctuation, grammar",
             Profile::StrictMoe => "Full MoE enforcement: all punctuation, character variants, 臺 normalization, grammar",
             Profile::UiStrings => "Relaxed for software UI: half-width colon allowed, en dash for ranges, strict vocabulary, no grammar",
+            Profile::Editorial => "AI writing review: base rules + filler phrase detection, semantic safety words, copula/passive checks",
         }
     }
 
@@ -88,6 +118,11 @@ impl Profile {
                 ellipsis_normalization: true,
                 range_en_dash: false,
                 grammar_checks: true,
+                ai_filler_detection: false,
+                ai_semantic_safety: false,
+                ai_density_detection: false,
+                ai_structural_patterns: false,
+                ai_threshold_multiplier: 1.0,
                 political_stance: PoliticalStance::RocCentric,
             },
             Profile::StrictMoe => ProfileConfig {
@@ -101,6 +136,11 @@ impl Profile {
                 ellipsis_normalization: true,
                 range_en_dash: false,
                 grammar_checks: true,
+                ai_filler_detection: false,
+                ai_semantic_safety: false,
+                ai_density_detection: false,
+                ai_structural_patterns: false,
+                ai_threshold_multiplier: 1.0,
                 political_stance: PoliticalStance::RocCentric,
             },
             Profile::UiStrings => ProfileConfig {
@@ -114,6 +154,31 @@ impl Profile {
                 ellipsis_normalization: true,
                 range_en_dash: true,
                 grammar_checks: false,
+                ai_filler_detection: false,
+                ai_semantic_safety: false,
+                ai_density_detection: false,
+                ai_structural_patterns: false,
+                ai_threshold_multiplier: 1.0,
+                political_stance: PoliticalStance::RocCentric,
+            },
+            // Editorial: base rules + all AI writing artifact detection.
+            // Targets discourse-level patterns overrepresented in LLM output.
+            Profile::Editorial => ProfileConfig {
+                spelling: true,
+                casing: true,
+                basic_punctuation: true,
+                colon_enforcement: true,
+                dunhao_detection: true,
+                range_normalization: true,
+                variant_normalization: false,
+                ellipsis_normalization: true,
+                range_en_dash: false,
+                grammar_checks: true,
+                ai_filler_detection: true,
+                ai_semantic_safety: true,
+                ai_density_detection: true,
+                ai_structural_patterns: true,
+                ai_threshold_multiplier: 1.0,
                 political_stance: PoliticalStance::RocCentric,
             },
         }
@@ -124,6 +189,7 @@ impl Profile {
         match s {
             "strict_moe" => Profile::StrictMoe,
             "ui_strings" => Profile::UiStrings,
+            "editorial" => Profile::Editorial,
             _ => Profile::Default,
         }
     }
@@ -134,6 +200,7 @@ impl Profile {
             "default" => Some(Profile::Default),
             "strict_moe" => Some(Profile::StrictMoe),
             "ui_strings" => Some(Profile::UiStrings),
+            "editorial" => Some(Profile::Editorial),
             _ => None,
         }
     }
@@ -237,6 +304,9 @@ pub enum RuleType {
     /// Character variant: MoE standard form differs from non-standard glyph
     /// (e.g. 裏->裡, 綫->線). Curated from OpenCC TWVariants.txt.
     Variant,
+    /// AI filler phrase: zero-information hedging/emphasis inserted by LLMs.
+    /// Fixed-string AC matches; deletions or simple substitutions.
+    AiFiller,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -272,6 +342,7 @@ impl RuleType {
         match self {
             RuleType::PoliticalColoring | RuleType::Typo => Severity::Error,
             RuleType::CrossStrait | RuleType::Confusable | RuleType::Variant => Severity::Warning,
+            RuleType::AiFiller => Severity::Info,
         }
     }
 }
@@ -445,7 +516,7 @@ impl Issue {
     }
 }
 
-/// Issue classification — covers spelling, case, punctuation, and grammar checks.
+/// Issue classification — covers spelling, case, punctuation, grammar, and AI style checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IssueType {
@@ -457,6 +528,10 @@ pub enum IssueType {
     Punctuation,
     Variant,
     Grammar,
+    /// AI writing artifact: filler phrases, semantic safety words, copula
+    /// avoidance, passive voice overuse.  NOT eligible for orthographic-tier
+    /// fixes — requires lexical_contextual or none.
+    AiStyle,
 }
 
 impl IssueType {
@@ -471,6 +546,7 @@ impl IssueType {
             IssueType::Punctuation => 5,
             IssueType::Variant => 6,
             IssueType::Grammar => 7,
+            IssueType::AiStyle => 8,
         }
     }
 
@@ -485,6 +561,7 @@ impl IssueType {
             IssueType::Punctuation => "punctuation",
             IssueType::Variant => "variant",
             IssueType::Grammar => "grammar",
+            IssueType::AiStyle => "ai_style",
         }
     }
 }
@@ -524,6 +601,7 @@ impl From<RuleType> for IssueType {
             RuleType::Typo => IssueType::Typo,
             RuleType::Confusable => IssueType::Confusable,
             RuleType::Variant => IssueType::Variant,
+            RuleType::AiFiller => IssueType::AiStyle,
         }
     }
 }

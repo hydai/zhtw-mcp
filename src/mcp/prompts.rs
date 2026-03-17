@@ -135,6 +135,9 @@ fn get_lint_natural(args: &std::collections::HashMap<String, String>) -> PromptG
 From the instruction, extract:
 - `fix_mode`: "lexical_safe" if the user asks to fix/correct/repair; "lexical_contextual" if they want all fixes; "orthographic" for punctuation/spacing only; "none" otherwise
 - `profile`: "strict_moe" if they mention MoE/standard forms/variants; "ui_strings" for software UI; "default" otherwise
+- `detect_ai`: true if they mention AI writing/filler/naturalness review (can combine with any profile); false otherwise
+- `ai_threshold`: "low" if they want sensitive/strict AI detection; "high" if they want conservative/lenient AI detection; "medium" (default) otherwise. Only meaningful when `detect_ai` is true.
+- `max_errors`: integer if the user specifies a rejection threshold (e.g. "reject if more than 3 errors", "no errors allowed" = 0). Omit if no gate requested.
 - `political_stance`: "neutral" if they ask for neutral/apolitical; "international" for international style; "roc_centric" (default)
 - `ignore_terms`: any terms the user explicitly says to skip/ignore
 - `content_type`: "markdown" if the text contains Markdown; "plain" otherwise
@@ -179,7 +182,7 @@ fn get_editorial_review(args: &std::collections::HashMap<String, String>) -> Pro
 ## Workflow
 
 For each iteration (up to {max_iterations} total):
-1. Call `zhtw` with the current text: `{{ "text": "...", "fix_mode": "lexical_safe", "explain": true, "output": "compact", "content_type": "markdown" }}`
+1. Call `zhtw` with the current text: `{{ "text": "...", "detect_ai": true, "fix_mode": "lexical_safe", "explain": true, "output": "compact", "content_type": "markdown" }}`
 2. If `accepted: true` with 0 errors, the text is finalized. Present the clean text.
 3. If issues remain:
    a. Explain each issue in context — why MoE prefers the standard form, cultural background

@@ -5,7 +5,7 @@
 // code block exclusion, URL/path exclusion, @mention exclusion, case rules,
 // punctuation normalization, and alternatives handling.
 
-use zhtw_mcp::engine::scan::Scanner;
+use zhtw_mcp::engine::scan::{ContentType, Scanner};
 use zhtw_mcp::rules::ruleset::{CaseRule, Profile, RuleType, SpellingRule};
 
 // ---------------------------------------------------------------------------
@@ -880,4 +880,144 @@ fn grammar_clean_text_produces_no_issues() {
         .iter()
         .any(|i| i.rule_type == zhtw_mcp::rules::ruleset::IssueType::Grammar);
     assert!(!has_grammar, "clean text should not trigger grammar checks");
+}
+
+// ---------------------------------------------------------------------------
+// AI writing detection (40.1)
+// ---------------------------------------------------------------------------
+
+use zhtw_mcp::rules::ruleset::IssueType;
+
+fn ai_filler_rule(from: &str, to: &[&str]) -> SpellingRule {
+    SpellingRule {
+        from: from.into(),
+        to: to.iter().map(|s| s.to_string()).collect(),
+        rule_type: RuleType::AiFiller,
+        disabled: false,
+        context: None,
+        english: None,
+        exceptions: None,
+        context_clues: None,
+        negative_context_clues: None,
+        tags: None,
+    }
+}
+
+#[test]
+fn ai_filler_rules_suppressed_in_default_profile() {
+    let rules = vec![ai_filler_rule("值得注意的是，", &[""])];
+    let scanner = Scanner::new(rules, vec![]);
+    let output =
+        scanner.scan_with_config("值得注意的是，系統需要重啟", &[], Profile::Default.config());
+    // Default profile has ai_filler_detection: false → no issues.
+    let ai_issues: Vec<_> = output
+        .issues
+        .iter()
+        .filter(|i| i.rule_type == IssueType::AiStyle)
+        .collect();
+    assert!(
+        ai_issues.is_empty(),
+        "default profile should suppress AI filler rules"
+    );
+}
+
+#[test]
+fn ai_filler_rules_fire_when_profile_enabled() {
+    let rules = vec![ai_filler_rule("值得注意的是，", &[""])];
+    let scanner = Scanner::new(rules, vec![]);
+    let mut cfg = Profile::Default.config();
+    cfg.ai_filler_detection = true;
+    let output = scanner.scan_with_config("值得注意的是，系統需要重啟", &[], cfg);
+    let ai_issues: Vec<_> = output
+        .issues
+        .iter()
+        .filter(|i| i.rule_type == IssueType::AiStyle)
+        .collect();
+    assert_eq!(ai_issues.len(), 1);
+    assert_eq!(ai_issues[0].found, "值得注意的是，");
+}
+
+#[test]
+fn ai_semantic_safety_fires_when_profile_enabled() {
+    let scanner = Scanner::new(vec![], vec![]);
+    let mut cfg = Profile::Default.config();
+    cfg.ai_semantic_safety = true;
+    let output = scanner.scan_with_config("這個定義意味著所有的值都必須為正", &[], cfg);
+    let ai_issues: Vec<_> = output
+        .issues
+        .iter()
+        .filter(|i| i.rule_type == IssueType::AiStyle)
+        .collect();
+    assert_eq!(ai_issues.len(), 1);
+    assert_eq!(ai_issues[0].found, "意味著");
+}
+
+#[test]
+fn ai_semantic_safety_suppressed_in_default_profile() {
+    let scanner = Scanner::new(vec![], vec![]);
+    let output = scanner.scan("這個定義意味著所有的值都必須為正");
+    let ai_issues: Vec<_> = output
+        .issues
+        .iter()
+        .filter(|i| i.rule_type == IssueType::AiStyle)
+        .collect();
+    assert!(
+        ai_issues.is_empty(),
+        "default profile should suppress AI semantic safety"
+    );
+}
+
+#[test]
+fn ai_density_detection_fires_with_editorial_profile() {
+    let scanner = Scanner::new(vec![], vec![]);
+    // Build a ~1200 char text with high density of '更重要的是'.
+    let filler = "這是正常的技術內容段落。";
+    let mut text = String::new();
+    for i in 0..100 {
+        if i % 20 == 0 {
+            text.push_str("更重要的是，我們需要重新評估這個方案。");
+        } else {
+            text.push_str(filler);
+        }
+    }
+    let output = scanner.scan_for_content_type(&text, ContentType::Plain, Profile::Editorial);
+    let density_issues: Vec<_> = output
+        .issues
+        .iter()
+        .filter(|i| {
+            i.rule_type == IssueType::AiStyle
+                && i.context.as_ref().is_some_and(|c| c.contains("次/千字"))
+        })
+        .collect();
+    assert!(
+        !density_issues.is_empty(),
+        "editorial profile should detect high density AI phrases"
+    );
+}
+
+#[test]
+fn ai_density_detection_suppressed_in_default_profile() {
+    let scanner = Scanner::new(vec![], vec![]);
+    let filler = "這是正常的技術內容段落。";
+    let mut text = String::new();
+    for i in 0..100 {
+        if i % 20 == 0 {
+            text.push_str("更重要的是，我們需要重新評估這個方案。");
+        } else {
+            text.push_str(filler);
+        }
+    }
+    let output = scanner.scan_for_content_type(&text, ContentType::Plain, Profile::Default);
+    let density_issues: Vec<_> = output
+        .issues
+        .iter()
+        .filter(|i| {
+            i.rule_type == IssueType::AiStyle
+                && i.context.as_ref().is_some_and(|c| c.contains("次/千字"))
+        })
+        .collect();
+    assert!(
+        density_issues.is_empty(),
+        "default profile should NOT run density detection"
+    );
 }

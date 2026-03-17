@@ -55,7 +55,7 @@ fn main() -> Result<()> {
     //   zhtw-mcp --pack <name>                  — activate a rule pack (repeatable)
     //   zhtw-mcp lint <file|--> [--format json|compact]  — lint file(s) or stdin
     //                           [--max-errors N]
-    //                           [--profile P]
+    //                           [--profile P] [--detect-ai]
     //                           [--content-type plain|markdown|yaml]
     //   zhtw-mcp setup <host>                   — generate agentic editor integration config
     //   zhtw-mcp pack import <file>             — install a pack
@@ -77,6 +77,8 @@ fn main() -> Result<()> {
     let mut fix_mode: Option<zhtw_mcp::fixer::FixMode> = None;
     let mut dry_run = false;
     let mut explain = false;
+    let mut detect_ai = false;
+    let mut ai_threshold_multiplier: f32 = 1.0;
     let mut baseline_path: Option<PathBuf> = None;
     let mut update_baseline = false;
     let mut diff_from: Option<String> = None;
@@ -202,6 +204,27 @@ fn main() -> Result<()> {
                                     .clone(),
                             );
                         }
+                        "--detect-ai" => {
+                            detect_ai = true;
+                            // Peek at next arg for optional threshold level.
+                            if let Some(next) = args.get(i + 1) {
+                                match next.as_str() {
+                                    "low" => {
+                                        ai_threshold_multiplier = 0.5;
+                                        i += 1;
+                                    }
+                                    "medium" => {
+                                        ai_threshold_multiplier = 1.0;
+                                        i += 1;
+                                    }
+                                    "high" => {
+                                        ai_threshold_multiplier = 1.5;
+                                        i += 1;
+                                    }
+                                    _ => {} // not a threshold level, leave for next iteration
+                                }
+                            }
+                        }
                         #[cfg(feature = "translate")]
                         "--verify" => {
                             verify = true;
@@ -304,8 +327,11 @@ fn main() -> Result<()> {
     let packs_dir = packs_dir.unwrap_or_else(zhtw_mcp::rules::store::default_packs_dir);
 
     // Setup subcommand: generate integration config for a host editor.
-    if let Some(host_str) = setup_host {
-        return run_setup(&host_str);
+    if let Some(ref host_str) = setup_host {
+        if host_str == "translation-guide" || host_str == "translation_guide" {
+            return run_translation_guide();
+        }
+        return run_setup(host_str);
     }
 
     // Pack subcommand: manage rule packs.
@@ -377,6 +403,8 @@ fn main() -> Result<()> {
             diff_from: diff_from.as_deref(),
             #[cfg(feature = "translate")]
             verify,
+            detect_ai,
+            ai_threshold_multiplier,
         });
     }
 
@@ -446,6 +474,8 @@ struct LintBatchParams<'a> {
     diff_from: Option<&'a str>,
     #[cfg(feature = "translate")]
     verify: bool,
+    detect_ai: bool,
+    ai_threshold_multiplier: f32,
 }
 
 fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
@@ -455,6 +485,16 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
         .profile_name
         .map(zhtw_mcp::rules::ruleset::Profile::from_str_lossy)
         .unwrap_or(zhtw_mcp::rules::ruleset::Profile::Default);
+
+    // Build effective config: profile base + detect_ai override.
+    let mut cfg = profile.config();
+    if params.detect_ai {
+        cfg.ai_filler_detection = true;
+        cfg.ai_semantic_safety = true;
+        cfg.ai_density_detection = true;
+        cfg.ai_structural_patterns = true;
+        cfg.ai_threshold_multiplier = params.ai_threshold_multiplier;
+    }
 
     // Build scanner once for all files, merging overrides + active packs.
     let ruleset = zhtw_mcp::rules::loader::load_embedded_ruleset()?;
@@ -547,6 +587,8 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
             profile: profile.name().to_owned(),
             content_type: format!("{content_type:?}"),
             fix_mode: fix_mode_str.clone(),
+            detect_ai: params.detect_ai,
+            ai_threshold: format!("{:.1}", params.ai_threshold_multiplier),
         };
 
         // Open file via fd, stat from the fd (TOCTOU-safe).
@@ -599,7 +641,7 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
             let output = match content_hit {
                 Some(hit) => hit.output,
                 None => {
-                    let o = scanner.scan_for_content_type(&text, content_type, profile);
+                    let o = scanner.scan_for_content_type_with_config(&text, content_type, cfg);
                     if let Some(Ok(mut c)) = scan_cache.as_ref().map(|mtx| mtx.lock()) {
                         let mtime = zhtw_mcp::cache::mtime_secs(&meta);
                         c.put(
@@ -646,7 +688,7 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
         if input_was_sc {
             text = s2t.convert(&text);
         }
-        let output = scanner.scan_for_content_type(&text, content_type, profile);
+        let output = scanner.scan_for_content_type_with_config(&text, content_type, cfg);
 
         Ok((text, input_was_sc, output, content_type))
     };
@@ -677,10 +719,11 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
         } else {
             output.detected_script.name()
         };
+        let mut ai_signature = output.ai_signature;
         let issues = output.issues;
 
         let scan = |input: &str| -> zhtw_mcp::engine::scan::ScanOutput {
-            scanner.scan_for_content_type(input, content_type, profile)
+            scanner.scan_for_content_type_with_config(input, content_type, cfg)
         };
 
         // Apply fixes if requested.
@@ -735,11 +778,21 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
         }
 
         // Count remaining issues after fix/S2T (rescan converted text).
+        // Single rescan serves both issue reporting and AI signature refresh.
         let report_issues = if has_text_changes && !params.dry_run {
             let rescan_text = fix_result
                 .as_ref()
                 .map_or(text.as_str(), |f| f.text.as_str());
-            let mut rescan = scan(rescan_text).issues;
+            let rescan_output = scan(rescan_text);
+            // Refresh AI signature from the fixed text (avoids a second scan).
+            let ai_active = cfg.ai_filler_detection
+                || cfg.ai_semantic_safety
+                || cfg.ai_density_detection
+                || cfg.ai_structural_patterns;
+            if ai_active {
+                ai_signature = rescan_output.ai_signature;
+            }
+            let mut rescan = rescan_output.issues;
             if let Some(ref fix) = fix_result {
                 // Suppress convergent-chain noise from the fixer's own replacements.
                 zhtw_mcp::fixer::suppress_convergent_issues(&mut rescan, &fix.applied_fixes);
@@ -824,6 +877,9 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
                     output["fixes_applied"] = serde_json::json!(fix.applied);
                     output["fixes_skipped"] = serde_json::json!(fix.skipped);
                 }
+                if let Some(ref sig) = ai_signature {
+                    output["ai_signature"] = serde_json::json!(sig);
+                }
                 if multi {
                     all_file_results.push(output);
                 } else {
@@ -884,6 +940,23 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
                         report_issues.len(),
                         c.reset
                     );
+                }
+                // AI signature score (when computed).
+                if let Some(ref sig) = ai_signature {
+                    let level = if sig.score >= 0.7 {
+                        "high"
+                    } else if sig.score >= 0.4 {
+                        "medium"
+                    } else {
+                        "low"
+                    };
+                    eprintln!(
+                        "{prefix}{}AI score:{} {:.2} ({level})",
+                        c.cyan, c.reset, sig.score
+                    );
+                    for signal in &sig.top_signals {
+                        eprintln!("  {}{signal}{}", c.dim, c.reset);
+                    }
                 }
             }
             LintFormat::Compact => {
@@ -1327,6 +1400,12 @@ fn run_setup(host_str: &str) -> Result<()> {
     };
 
     let output = setup::generate_for_host(host);
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
+fn run_translation_guide() -> Result<()> {
+    let output = zhtw_mcp::mcp::setup::generate_translation_guide();
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
 }

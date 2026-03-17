@@ -118,7 +118,7 @@ impl Scanner {
                     issues.push(punct_issue(i, found, suggestion, context));
                 }
                 b':' => {
-                    // Colon enforcement controlled by profile config (2.2).
+                    // Colon enforcement controlled by profile config.
                     if !cfg.colon_enforcement {
                         continue;
                     }
@@ -206,7 +206,7 @@ impl Scanner {
         }
     }
 
-    /// Enumeration comma (dunhao) detection (2.3).
+    /// Enumeration comma (dunhao) detection.
     ///
     /// Scans for sequences of short items separated by full-width ， that
     /// likely represent coordinate lists and should use 、 instead.
@@ -355,7 +355,7 @@ impl Scanner {
         }
     }
 
-    /// Range indicator normalization (2.5).
+    /// Range indicator normalization.
     ///
     /// Detects ~ or - used as range indicators in CJK context and suggests
     /// the profile-appropriate full-width form: ～ (wave dash) for prose,
