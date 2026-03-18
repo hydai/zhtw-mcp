@@ -417,10 +417,6 @@ fn main() -> Result<()> {
     let overrides_path =
         overrides_path.unwrap_or_else(zhtw_mcp::rules::store::default_overrides_path);
 
-    // Warn if legacy sled DB exists (cannot auto-migrate).
-    let legacy_sled_path = legacy_db_path();
-    zhtw_mcp::rules::store::warn_legacy_sled(&legacy_sled_path, &overrides_path);
-
     let suppressions_path =
         suppressions_path.unwrap_or_else(zhtw_mcp::rules::store::default_suppressions_path);
     let store = zhtw_mcp::rules::store::OverrideStore::open(&overrides_path)?;
@@ -1684,20 +1680,4 @@ fn is_excluded(path: &str, patterns: &[String]) -> bool {
         }
     }
     false
-}
-
-/// Path where the legacy sled DB used to live.
-fn legacy_db_path() -> PathBuf {
-    data_dir()
-        .map(|d| d.join("zhtw-mcp").join("rules.sled"))
-        .unwrap_or_else(|| PathBuf::from("rules.sled"))
-}
-
-/// Respect XDG_DATA_HOME on all platforms (including macOS) before
-/// falling back to the platform-native data directory.
-fn data_dir() -> Option<PathBuf> {
-    std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(dirs::data_dir)
 }

@@ -58,7 +58,6 @@ pub struct ScanOutput {
     pub detected_script: ChineseType,
     /// AI writing signature report.  Present only when AI scoring is
     /// requested (editorial profile or explicit detect_ai/ai_score).
-    /// Note: no skip_serializing_if — bincode requires all fields present.
     #[serde(default)]
     pub ai_signature: Option<crate::engine::ai_score::AiSignatureReport>,
 }

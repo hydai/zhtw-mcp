@@ -1,12 +1,10 @@
 // Baseline mode for incremental adoption.
 //
-// Issue fingerprints: hash(rule_id + file + normalized context).
+// Issue fingerprints: hash(rule_type + found text + file path).
 // --update-baseline writes the baseline; --baseline reads and filters.
 
 use std::collections::HashSet;
 use std::path::Path;
-
-use sha2::{Digest, Sha256};
 
 use crate::rules::ruleset::Issue;
 
@@ -66,15 +64,14 @@ impl Baseline {
 /// This is intentionally position-independent so edits that shift line
 /// numbers don't invalidate the baseline.
 fn fingerprint(file: &str, issue: &Issue) -> String {
-    let mut hasher = Sha256::new();
+    let mut hasher = blake3::Hasher::new();
     let rule_str = serde_json::to_string(&issue.rule_type).unwrap_or_default();
     hasher.update(rule_str.as_bytes());
     hasher.update(b"|");
     hasher.update(issue.found.as_bytes());
     hasher.update(b"|");
     hasher.update(file.as_bytes());
-    let hash = hasher.finalize();
-    format!("{hash:x}")
+    hasher.finalize().to_hex().to_string()
 }
 
 #[cfg(test)]

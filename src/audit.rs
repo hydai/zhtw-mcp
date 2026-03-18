@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 /// Monotonic counter to guarantee uniqueness even within the same nanosecond.
 static TRACE_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -48,7 +47,7 @@ impl Trace {
         Self {
             trace_id: generate_trace_id(),
             ruleset_hash: ruleset_hash.to_owned(),
-            input_hash: sha256_hex(input.as_bytes()),
+            input_hash: hash_hex(input.as_bytes()),
             output_hash: None,
             timestamp: now_iso8601(),
             tool: tool.to_owned(),
@@ -62,13 +61,13 @@ impl Trace {
     }
 
     pub fn with_output(mut self, output: &str) -> Self {
-        self.output_hash = Some(sha256_hex(output.as_bytes()));
+        self.output_hash = Some(hash_hex(output.as_bytes()));
         self
     }
 }
 
-pub fn sha256_hex(data: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(data))
+pub fn hash_hex(data: &[u8]) -> String {
+    blake3::hash(data).to_hex().to_string()
 }
 
 /// Generate a unique trace ID from timestamp + PID + atomic counter, hashed
@@ -85,19 +84,13 @@ fn generate_trace_id() -> String {
     let seq = TRACE_SEQ.fetch_add(1, Ordering::Relaxed);
     let pid = process::id();
 
-    let mut hasher = Sha256::new();
-    hasher.update(nanos.to_le_bytes());
-    hasher.update(pid.to_le_bytes());
-    hasher.update(seq.to_le_bytes());
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&nanos.to_le_bytes());
+    hasher.update(&pid.to_le_bytes());
+    hasher.update(&seq.to_le_bytes());
     hasher.update(urandom_seed());
-    let digest = hasher.finalize();
-    // Take first 16 bytes (128 bits) → 32 hex chars.
-    let mut hex = String::with_capacity(32);
-    for b in &digest[..16] {
-        use std::fmt::Write;
-        let _ = write!(hex, "{b:02x}");
-    }
-    hex
+    // Take first 32 hex chars (128 bits) from the BLAKE3 output.
+    hasher.finalize().to_hex()[..32].to_string()
 }
 
 fn now_iso8601() -> String {
@@ -139,19 +132,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sha256_deterministic() {
-        let a = sha256_hex(b"hello");
-        let b = sha256_hex(b"hello");
+    fn hash_deterministic() {
+        let a = hash_hex(b"hello");
+        let b = hash_hex(b"hello");
         assert_eq!(a, b);
         assert_eq!(a.len(), 64);
     }
 
     #[test]
-    fn sha256_known_value() {
-        let h = sha256_hex(b"hello");
+    fn hash_known_value() {
+        let h = hash_hex(b"hello");
+        // BLAKE3 hash of "hello"
         assert_eq!(
             h,
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+            "ea8f163db38682925e4491c5e58d4bb3506ef8c14eb78a86e908c5624a67200f"
         );
     }
 

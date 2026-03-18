@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 
 use super::ruleset::Ruleset;
-use crate::audit::sha256_hex;
+use crate::audit::hash_hex;
 
 /// Parse the embedded ruleset JSON into a Ruleset struct.
 pub fn load_embedded_ruleset() -> Result<Ruleset> {
@@ -20,7 +20,7 @@ pub fn compute_ruleset_hash(
         "case": case_rules,
     });
     let bytes = serde_json::to_vec(&canonical).expect("Value serialization is infallible");
-    sha256_hex(&bytes)
+    hash_hex(&bytes)
 }
 
 #[cfg(test)]
