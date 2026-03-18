@@ -321,20 +321,6 @@ fn config_dir() -> Option<PathBuf> {
         .or_else(dirs::config_dir)
 }
 
-/// Warn if a legacy sled database exists and no overrides file has been
-/// created yet. The sled dependency was removed, so we cannot read the old
-/// DB — we simply alert the user to re-apply any custom overrides.
-pub fn warn_legacy_sled(sled_path: &Path, overrides_path: &Path) {
-    if !sled_path.exists() || overrides_path.exists() {
-        return;
-    }
-    log::warn!(
-        "legacy sled DB found at {}; custom overrides cannot be auto-migrated \
-         (sled dependency removed). Re-apply any custom overrides via the overrides JSON file.",
-        sled_path.display()
-    );
-}
-
 // SuppressionStore: per-user term suppression list
 
 /// Persistent suppression list. Suppressed terms are still scanned but their

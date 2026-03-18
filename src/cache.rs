@@ -68,7 +68,7 @@ struct CacheEntry {
     timestamp_secs: u64,
 }
 
-/// Persistent scan cache backed by a bincode file.
+/// Persistent scan cache backed by a JSON file.
 #[derive(Debug)]
 pub struct ScanCache {
     path: PathBuf,
@@ -222,7 +222,7 @@ impl ScanCache {
         let _ = std::fs::create_dir_all(parent);
 
         let entries_vec: Vec<&CacheEntry> = self.entries.values().collect();
-        let Ok(bytes) = bincode::serialize(&entries_vec) else {
+        let Ok(bytes) = serde_json::to_vec(&entries_vec) else {
             return;
         };
 
@@ -267,12 +267,12 @@ fn atomic_write(parent: &Path, dest: &Path, bytes: &[u8]) -> bool {
         .is_ok_and(|mut tmp| tmp.write_all(bytes).is_ok() && tmp.persist(dest).is_ok())
 }
 
-/// Default cache file location: ~/.cache/zhtw-mcp/scan-cache.bin
+/// Default cache file location: ~/.cache/zhtw-mcp/scan-cache.json
 fn default_cache_path() -> PathBuf {
     dirs::cache_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join("zhtw-mcp")
-        .join("scan-cache.bin")
+        .join("scan-cache.json")
 }
 
 /// Lookup key combining file path + scan parameters.
@@ -320,7 +320,7 @@ fn load_entries(path: &Path, ttl_secs: u64) -> HashMap<String, CacheEntry> {
         Err(_) => return HashMap::new(),
     };
 
-    let entries: Vec<CacheEntry> = match bincode::deserialize(&bytes) {
+    let entries: Vec<CacheEntry> = match serde_json::from_slice(&bytes) {
         Ok(v) => v,
         Err(_) => return HashMap::new(),
     };
