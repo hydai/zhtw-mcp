@@ -14,6 +14,7 @@
                 context_clues: None,
                 negative_context_clues: None,
                 exceptions: None,
+                positional_clues: None,
                 tags: None,
             },
             SpellingRule {
@@ -27,6 +28,7 @@
                 context_clues: None,
                 negative_context_clues: None,
                 exceptions: None,
+                positional_clues: None,
                 tags: None,
             },
         ];
@@ -59,6 +61,7 @@
                 context_clues: None,
                 negative_context_clues: None,
                 exceptions: None,
+                positional_clues: None,
                 tags: None,
             },
             SpellingRule {
@@ -72,6 +75,7 @@
                 context_clues: None,
                 negative_context_clues: None,
                 exceptions: None,
+                positional_clues: None,
                 tags: None,
             },
         ];
@@ -98,6 +102,7 @@
             context_clues: None,
             negative_context_clues: None,
             exceptions: None,
+            positional_clues: None,
             tags: None,
         }]
     }
@@ -142,6 +147,7 @@
                 context_clues: None,
                 negative_context_clues: None,
                 exceptions: None,
+                positional_clues: None,
                 tags: None,
             },
             SpellingRule {
@@ -155,6 +161,7 @@
                 context_clues: None,
                 negative_context_clues: None,
                 exceptions: None,
+                positional_clues: None,
                 tags: None,
             },
         ]
@@ -234,6 +241,7 @@
             context_clues: None,
             negative_context_clues: None,
             exceptions: None,
+            positional_clues: None,
             tags: None,
         }];
         let scanner = Scanner::new(rules, vec![]);
@@ -660,6 +668,7 @@
             context_clues: None,
             negative_context_clues: None,
             exceptions: None,
+            positional_clues: None,
             tags: None,
         }];
         let scanner = Scanner::new(rules, vec![]);
@@ -768,6 +777,7 @@
             context_clues: None,
             negative_context_clues: None,
             exceptions: None,
+            positional_clues: None,
             tags: None,
         }];
         let scanner = Scanner::new(rules, vec![]);
@@ -1179,6 +1189,7 @@
                 context_clues: None,
                 negative_context_clues: None,
                 exceptions: None,
+                positional_clues: None,
                 tags: None,
             },
             SpellingRule {
@@ -1192,6 +1203,7 @@
                 context_clues: None,
                 negative_context_clues: None,
                 exceptions: None,
+                positional_clues: None,
                 tags: None,
             },
         ];
@@ -1217,6 +1229,7 @@
                 context_clues: None,
                 negative_context_clues: None,
                 exceptions: None,
+                positional_clues: None,
                 tags: None,
             },
             SpellingRule {
@@ -1230,6 +1243,7 @@
                 context_clues: None,
                 negative_context_clues: None,
                 exceptions: None,
+                positional_clues: None,
                 tags: None,
             },
         ];
@@ -1259,6 +1273,7 @@
                 context_clues: None,
                 negative_context_clues: None,
                 exceptions: None,
+                positional_clues: None,
                 tags: None,
             },
             SpellingRule {
@@ -1272,6 +1287,7 @@
                 context_clues: None,
                 negative_context_clues: None,
                 exceptions: None,
+                positional_clues: None,
                 tags: None,
             },
         ];
@@ -1531,6 +1547,7 @@
             context_clues: None,
             negative_context_clues: None,
             exceptions: None,
+            positional_clues: None,
             tags: None,
         }
     }
@@ -1546,6 +1563,7 @@
             context_clues: None,
             negative_context_clues: None,
             exceptions: Some(exceptions.into_iter().map(String::from).collect()),
+            positional_clues: None,
             tags: None,
         }
     }
@@ -1694,6 +1712,7 @@
                 context_clues: None,
                 negative_context_clues: None,
                 exceptions: None,
+                positional_clues: None,
                 tags: None,
             },
             variant_rule("裏", "裡"),
@@ -2191,6 +2210,7 @@
             exceptions: None,
             context_clues: None,
             negative_context_clues: Some(vec!["的".into(), "等".into()]),
+            positional_clues: None,
             tags: None,
         }];
         let scanner = Scanner::new(rules.clone(), vec![]);
@@ -2225,6 +2245,7 @@
             exceptions: None,
             context_clues: None,
             negative_context_clues: Some(vec!["獨家".into()]),
+            positional_clues: None,
             tags: None,
         }];
         let scanner = Scanner::new(rules, vec![]);

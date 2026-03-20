@@ -176,6 +176,7 @@ mod tests {
                 exceptions: None,
                 context_clues: None,
                 negative_context_clues: None,
+                positional_clues: None,
                 tags: None,
             },
             SpellingRule {
@@ -189,6 +190,7 @@ mod tests {
                 exceptions: None,
                 context_clues: None,
                 negative_context_clues: None,
+                positional_clues: None,
                 tags: None,
             },
         ];
