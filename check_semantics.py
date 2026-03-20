@@ -55,9 +55,8 @@ def main():
             for t in t_vals:
                 if t in geo_targets:
                     prev_loc, prev_f = geo_targets[t]
-                    # It's a duplicate if the target is the same but 'from' differs (e.g. OpenCC variant)
-                    # We will output this and user can verify
-                    issues.append(f"[WARN] {loc} duplicate geography rule for '{t}' (also see {prev_loc} '{prev_f}')")
+                    if prev_f != f_val:
+                        issues.append(f"[WARN] {loc} duplicate geography rule for '{t}' (also see {prev_loc} '{prev_f}')")
                 else:
                     geo_targets[t] = (loc, f_val)
                     
