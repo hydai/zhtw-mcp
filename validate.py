@@ -1,6 +1,5 @@
 import json
 import unicodedata
-import random
 from collections import defaultdict
 import re
 
@@ -28,20 +27,21 @@ def main():
         step = max(1, len(domain_rules) // 30)
         spot_checks = domain_rules[::step][:30]
         for r in spot_checks:
-            print(f"[CHECK] {r['from']} -> {r['to']} | Context: {r.get('context')}")
+            print(f"[CHECK] {r.get('from', '')} -> {r.get('to', [])} | Context: {r.get('context', '')}")
 
     print("\n=== C. @geo_review.txt accuracy ===")
     geo_rules = [r for r in rules if '@geo' in r.get('context', '')]
     print(f"Total @geo rules found: {len(geo_rules)}")
     for r in geo_rules:
-        print(f"[GEO] {r['from']} -> {r['to']} | Context: {r.get('context')}")
+        print(f"[GEO] {r.get('from', '')} -> {r.get('to', [])} | Context: {r.get('context', '')}")
     
     # Check for missing geo tags in common countries (basic check)
     countries = ['中國', '美國', '日本', '德國', '法國', '英國']
     for r in rules:
         if '@geo' not in r.get('context', ''):
-            if any(c in r['from'] for c in countries):
-                print(f"[WARN] Potential missing @geo tag: {r['from']}")
+            f_val = r.get('from', '')
+            if any(c in f_val for c in countries):
+                print(f"[WARN] Potential missing @geo tag: {f_val}")
 
     print("\n=== D. Context Quality (short contexts without disambiguation) ===")
     for r in rules:
@@ -50,7 +50,7 @@ def main():
             # Check if it's strictly just the domain tag
             clean_ctx = re.sub(r'@domain\s+\S+[。，]?', '', ctx).strip()
             if len(clean_ctx) < 2:
-                print(f"[WARN] Short context for '{r['from']}': {ctx}")
+                print(f"[WARN] Short context for '{r.get('from', '')}': {ctx}")
 
     print("\n=== E. Duplicate Detection ===")
     from_seen = defaultdict(list)
@@ -79,7 +79,7 @@ def main():
     new_rules = rules[-122:] # Assuming appended at the end
     print(f"Checking last 122 rules (assuming they are the new ones):")
     for r in new_rules[:15]: # Print first 15 to review
-        print(f"[NEW] {r['from']} -> {r['to']} | Context: {r.get('context', '')} | Clues: {r.get('context_clues', [])}")
+        print(f"[NEW] {r.get('from', '')} -> {r.get('to', [])} | Context: {r.get('context', '')} | Clues: {r.get('context_clues', [])}")
         
 if __name__ == "__main__":
     main()
