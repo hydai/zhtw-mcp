@@ -388,6 +388,21 @@ pub struct SpellingRule {
     /// precede it (list-item grammatical usage vs. project/IT usage).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub negative_context_clues: Option<Vec<String>>,
+    /// Positional conditions that constrain WHERE a context term must appear
+    /// relative to the match.  More expressive than flat context_clues (which
+    /// check presence anywhere in +-40-char window).  Syntax:
+    ///
+    /// - `before:TERM` — TERM must appear within 20 chars AFTER the match
+    /// - `after:TERM` — TERM must appear within 20 chars BEFORE the match
+    /// - `adjacent:TERM` — TERM must be immediately adjacent (no gap)
+    /// - `not_before:TERM` — TERM must NOT appear within 20 chars after
+    /// - `not_after:TERM` — TERM must NOT appear within 20 chars before
+    ///
+    /// All positive conditions must pass (AND). Any negative condition vetoes.
+    /// When both context_clues and positional_clues are present, both must
+    /// match (AND).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub positional_clues: Option<Vec<String>>,
     /// Optional tags for categorization and filtering in rule packs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
@@ -413,6 +428,7 @@ impl SpellingRule {
             exceptions: None,
             context_clues: None,
             negative_context_clues: None,
+            positional_clues: None,
             tags: None,
         }
     }

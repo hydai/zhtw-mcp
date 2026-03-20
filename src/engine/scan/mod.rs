@@ -90,6 +90,63 @@ pub(crate) const CONTEXT_WINDOW_CHARS: usize = 40;
 /// The fixer uses a stricter threshold (2) before auto-applying corrections.
 const MIN_SCAN_CLUE_MATCHES: usize = 1;
 
+/// Number of characters for positional clue windows (before:/after:).
+/// Narrower than the general context window (40) because positional clues
+/// express proximity, not just co-occurrence.
+const POSITIONAL_WINDOW_CHARS: usize = 20;
+
+/// A parsed positional condition for disambiguation.
+///
+/// Positional clues constrain WHERE a context term must appear relative to
+/// the AC match, unlike flat context_clues which check presence anywhere
+/// in the +-40-char window.
+#[derive(Debug, Clone)]
+pub(crate) enum PositionalClue {
+    /// TERM must appear within POSITIONAL_WINDOW_CHARS chars AFTER the match.
+    Before(String),
+    /// TERM must appear within POSITIONAL_WINDOW_CHARS chars BEFORE the match.
+    After(String),
+    /// TERM must be immediately adjacent to the match (no gap, either side).
+    Adjacent(String),
+    /// TERM must NOT appear within POSITIONAL_WINDOW_CHARS chars AFTER the match.
+    NotBefore(String),
+    /// TERM must NOT appear within POSITIONAL_WINDOW_CHARS chars BEFORE the match.
+    NotAfter(String),
+}
+
+impl PositionalClue {
+    /// Parse a positional clue string (e.g. "before:函式", "not_after:的").
+    /// Returns None if the syntax is unrecognized.
+    fn parse(s: &str) -> Option<Self> {
+        if let Some(term) = s.strip_prefix("before:") {
+            if !term.is_empty() {
+                return Some(PositionalClue::Before(term.to_string()));
+            }
+        }
+        if let Some(term) = s.strip_prefix("after:") {
+            if !term.is_empty() {
+                return Some(PositionalClue::After(term.to_string()));
+            }
+        }
+        if let Some(term) = s.strip_prefix("adjacent:") {
+            if !term.is_empty() {
+                return Some(PositionalClue::Adjacent(term.to_string()));
+            }
+        }
+        if let Some(term) = s.strip_prefix("not_before:") {
+            if !term.is_empty() {
+                return Some(PositionalClue::NotBefore(term.to_string()));
+            }
+        }
+        if let Some(term) = s.strip_prefix("not_after:") {
+            if !term.is_empty() {
+                return Some(PositionalClue::NotAfter(term.to_string()));
+            }
+        }
+        None
+    }
+}
+
 // Shared helper functions
 
 /// Returns true if the text between `prev_end` and `offset` contains a
@@ -488,6 +545,9 @@ pub struct Scanner {
     /// of any `rule.to` entry.  When false, `already_correct_form()` is
     /// guaranteed to return false and can be skipped entirely.
     spelling_has_superstring: Vec<bool>,
+    /// Per spelling-rule index: parsed positional clues.  None when the rule
+    /// has no positional_clues.  Checked after context-clue gate passes.
+    rule_positional_clues: Vec<Option<Vec<PositionalClue>>>,
 }
 
 impl Scanner {
@@ -635,6 +695,34 @@ impl Scanner {
             }
         }
 
+        // Parse positional clues from raw strings into structured form.
+        // Invalid syntax is logged and skipped (fail-open).
+        let rule_positional_clues: Vec<Option<Vec<PositionalClue>>> = spelling_rules
+            .iter()
+            .map(|rule| {
+                rule.positional_clues.as_ref().and_then(|raw| {
+                    let parsed: Vec<PositionalClue> = raw
+                        .iter()
+                        .filter_map(|s| {
+                            let clue = PositionalClue::parse(s);
+                            if clue.is_none() {
+                                eprintln!(
+                                    "[zhtw-mcp] rule '{}': unrecognized positional clue '{}'",
+                                    rule.from, s
+                                );
+                            }
+                            clue
+                        })
+                        .collect();
+                    if parsed.is_empty() {
+                        None
+                    } else {
+                        Some(parsed)
+                    }
+                })
+            })
+            .collect();
+
         let spelling_patterns: Vec<&str> = spelling_rules.iter().map(|r| r.from.as_str()).collect();
 
         // Build charwise double-array AC for spelling (daachorse).
@@ -706,6 +794,7 @@ impl Scanner {
             rule_pos_clue_ids,
             rule_neg_clue_ids,
             spelling_has_superstring,
+            rule_positional_clues,
         }
     }
 
@@ -1280,6 +1369,7 @@ mod tests {
             context_clues: None,
             negative_context_clues: None,
             exceptions: Some(vec!["下著".into()]),
+            positional_clues: None,
             tags: None,
         }];
         let scanner = Scanner::new(rules, vec![]);
@@ -1306,6 +1396,7 @@ mod tests {
             context_clues: Some(vec!["程式".into(), "軟體".into()]),
             negative_context_clues: None,
             exceptions: None,
+            positional_clues: None,
             tags: None,
         }];
         let scanner = Scanner::new(rules, vec![]);
@@ -1337,6 +1428,7 @@ mod tests {
             context_clues: None,
             negative_context_clues: Some(vec!["掛載".into(), "mount".into()]),
             exceptions: None,
+            positional_clues: None,
             tags: None,
         }];
         let scanner = Scanner::new(rules, vec![]);
@@ -1426,6 +1518,400 @@ mod tests {
         assert!(
             scanner.spelling_ac_charwise.is_some(),
             "charwise AC should build for the full embedded ruleset"
+        );
+    }
+
+    // --- positional_clues tests ---
+
+    #[test]
+    fn positional_before_fires_when_term_follows() {
+        // before:函式 means 函式 must appear within 20 chars AFTER the match.
+        let rules = vec![SpellingRule {
+            from: "調用".into(),
+            to: vec!["呼叫".into()],
+            rule_type: RuleType::CrossStrait,
+            disabled: false,
+            context: None,
+            english: None,
+            context_clues: None,
+            negative_context_clues: None,
+            exceptions: None,
+            positional_clues: Some(vec!["before:函式".into()]),
+            tags: None,
+        }];
+        let scanner = Scanner::new(rules, vec![]);
+
+        // 函式 follows 調用 — should fire.
+        let issues = scanner.scan("請調用函式來處理").issues;
+        assert_eq!(issues.len(), 1, "should fire when 函式 follows: {issues:?}");
+        assert_eq!(issues[0].found, "調用");
+
+        // 函式 absent — should NOT fire.
+        let issues = scanner.scan("請調用這個方法").issues;
+        assert!(
+            issues.is_empty(),
+            "should not fire without 函式 after match: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn positional_after_fires_when_term_precedes() {
+        // after:請 means 請 must appear within 20 chars BEFORE the match.
+        let rules = vec![SpellingRule {
+            from: "調用".into(),
+            to: vec!["呼叫".into()],
+            rule_type: RuleType::CrossStrait,
+            disabled: false,
+            context: None,
+            english: None,
+            context_clues: None,
+            negative_context_clues: None,
+            exceptions: None,
+            positional_clues: Some(vec!["after:請".into()]),
+            tags: None,
+        }];
+        let scanner = Scanner::new(rules, vec![]);
+
+        // 請 precedes 調用 — should fire.
+        let issues = scanner.scan("請調用函式").issues;
+        assert_eq!(issues.len(), 1, "should fire when 請 precedes: {issues:?}");
+
+        // 請 absent — should NOT fire.
+        let issues = scanner.scan("直接調用函式").issues;
+        assert!(
+            issues.is_empty(),
+            "should not fire without 請 before match: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn positional_adjacent_fires_when_immediately_next() {
+        // adjacent:函式 means 函式 must be immediately adjacent (no gap).
+        let rules = vec![SpellingRule {
+            from: "調用".into(),
+            to: vec!["呼叫".into()],
+            rule_type: RuleType::CrossStrait,
+            disabled: false,
+            context: None,
+            english: None,
+            context_clues: None,
+            negative_context_clues: None,
+            exceptions: None,
+            positional_clues: Some(vec!["adjacent:函式".into()]),
+            tags: None,
+        }];
+        let scanner = Scanner::new(rules, vec![]);
+
+        // 函式 immediately after 調用 — should fire.
+        let issues = scanner.scan("調用函式").issues;
+        assert_eq!(
+            issues.len(),
+            1,
+            "should fire when 函式 is adjacent: {issues:?}"
+        );
+
+        // Gap between them — should NOT fire.
+        let issues = scanner.scan("調用某個函式").issues;
+        assert!(
+            issues.is_empty(),
+            "should not fire with gap between match and term: {issues:?}"
+        );
+
+        // 函式 immediately before 調用 — should also fire (adjacent = either side).
+        let issues = scanner.scan("函式調用方式").issues;
+        assert_eq!(
+            issues.len(),
+            1,
+            "should fire when 函式 is adjacent before: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn positional_not_before_vetoes() {
+        // not_before:的 means 的 must NOT appear within 20 chars after.
+        let rules = vec![SpellingRule {
+            from: "項目".into(),
+            to: vec!["專案".into()],
+            rule_type: RuleType::CrossStrait,
+            disabled: false,
+            context: None,
+            english: None,
+            context_clues: None,
+            negative_context_clues: None,
+            exceptions: None,
+            positional_clues: Some(vec!["not_before:的".into()]),
+            tags: None,
+        }];
+        let scanner = Scanner::new(rules, vec![]);
+
+        // No 的 after — should fire.
+        let issues = scanner.scan("這個項目進度超前").issues;
+        assert_eq!(issues.len(), 1, "should fire without veto term: {issues:?}");
+
+        // 的 follows — should NOT fire.
+        let issues = scanner.scan("項目的名稱").issues;
+        assert!(
+            issues.is_empty(),
+            "should be vetoed by 的 after match: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn positional_not_after_vetoes() {
+        // not_after:清單 means 清單 must NOT appear within 20 chars before.
+        let rules = vec![SpellingRule {
+            from: "項目".into(),
+            to: vec!["專案".into()],
+            rule_type: RuleType::CrossStrait,
+            disabled: false,
+            context: None,
+            english: None,
+            context_clues: None,
+            negative_context_clues: None,
+            exceptions: None,
+            positional_clues: Some(vec!["not_after:清單".into()]),
+            tags: None,
+        }];
+        let scanner = Scanner::new(rules, vec![]);
+
+        // 清單 absent — should fire.
+        let issues = scanner.scan("這個項目進度超前").issues;
+        assert_eq!(issues.len(), 1, "should fire without veto term: {issues:?}");
+
+        // 清單 precedes — should NOT fire.
+        let issues = scanner.scan("清單項目需要確認").issues;
+        assert!(
+            issues.is_empty(),
+            "should be vetoed by 清單 before match: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn positional_and_context_clues_both_required() {
+        // Rule has both context_clues and positional_clues.  Both must pass.
+        let rules = vec![SpellingRule {
+            from: "調用".into(),
+            to: vec!["呼叫".into()],
+            rule_type: RuleType::CrossStrait,
+            disabled: false,
+            context: None,
+            english: None,
+            context_clues: Some(vec!["程式".into()]),
+            negative_context_clues: None,
+            exceptions: None,
+            positional_clues: Some(vec!["before:函式".into()]),
+            tags: None,
+        }];
+        let scanner = Scanner::new(rules, vec![]);
+
+        // Both satisfied: 程式 in window AND 函式 after — should fire.
+        let issues = scanner.scan("這個程式調用函式").issues;
+        assert_eq!(
+            issues.len(),
+            1,
+            "should fire when both context and positional match: {issues:?}"
+        );
+
+        // context_clues satisfied but positional NOT — should not fire.
+        let issues = scanner.scan("這個程式調用方法").issues;
+        assert!(
+            issues.is_empty(),
+            "positional fails, should not fire: {issues:?}"
+        );
+
+        // positional satisfied but context_clues NOT — should not fire.
+        let issues = scanner.scan("直接調用函式").issues;
+        assert!(
+            issues.is_empty(),
+            "context_clues fails, should not fire: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn positional_multiple_conditions_all_must_pass() {
+        // Multiple positional conditions: all must pass (AND).
+        let rules = vec![SpellingRule {
+            from: "調用".into(),
+            to: vec!["呼叫".into()],
+            rule_type: RuleType::CrossStrait,
+            disabled: false,
+            context: None,
+            english: None,
+            context_clues: None,
+            negative_context_clues: None,
+            exceptions: None,
+            positional_clues: Some(vec!["after:請".into(), "before:函式".into()]),
+            tags: None,
+        }];
+        let scanner = Scanner::new(rules, vec![]);
+
+        // Both conditions met.
+        let issues = scanner.scan("請調用函式").issues;
+        assert_eq!(
+            issues.len(),
+            1,
+            "both positional conditions met: {issues:?}"
+        );
+
+        // Only one condition met.
+        let issues = scanner.scan("請調用方法").issues;
+        assert!(
+            issues.is_empty(),
+            "only after: met, before: not — should not fire: {issues:?}"
+        );
+
+        let issues = scanner.scan("直接調用函式").issues;
+        assert!(
+            issues.is_empty(),
+            "only before: met, after: not — should not fire: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn positional_no_regression_without_positional_clues() {
+        // Rules without positional_clues should behave exactly as before.
+        let rules = vec![SpellingRule {
+            from: "軟件".into(),
+            to: vec!["軟體".into()],
+            rule_type: RuleType::CrossStrait,
+            disabled: false,
+            context: None,
+            english: None,
+            context_clues: None,
+            negative_context_clues: None,
+            exceptions: None,
+            positional_clues: None,
+            tags: None,
+        }];
+        let scanner = Scanner::new(rules, vec![]);
+        let issues = scanner.scan("這個軟件很好用").issues;
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].found, "軟件");
+    }
+
+    #[test]
+    fn positional_before_stops_at_paragraph_break() {
+        // before:函式 should NOT match across a paragraph boundary.
+        let rules = vec![SpellingRule {
+            from: "調用".into(),
+            to: vec!["呼叫".into()],
+            rule_type: RuleType::CrossStrait,
+            disabled: false,
+            context: None,
+            english: None,
+            context_clues: None,
+            negative_context_clues: None,
+            exceptions: None,
+            positional_clues: Some(vec!["before:函式".into()]),
+            tags: None,
+        }];
+        let scanner = Scanner::new(rules, vec![]);
+
+        // 函式 is in the next paragraph — should NOT fire.
+        let issues = scanner.scan("請調用方法\n\n函式定義在此").issues;
+        assert!(
+            issues.is_empty(),
+            "before: must not match across paragraph break: {issues:?}"
+        );
+
+        // 函式 is in the same paragraph — should fire.
+        let issues = scanner.scan("請調用函式").issues;
+        assert_eq!(issues.len(), 1);
+    }
+
+    #[test]
+    fn positional_after_stops_at_paragraph_break() {
+        // after:請 should NOT match across a paragraph boundary.
+        let rules = vec![SpellingRule {
+            from: "調用".into(),
+            to: vec!["呼叫".into()],
+            rule_type: RuleType::CrossStrait,
+            disabled: false,
+            context: None,
+            english: None,
+            context_clues: None,
+            negative_context_clues: None,
+            exceptions: None,
+            positional_clues: Some(vec!["after:請".into()]),
+            tags: None,
+        }];
+        let scanner = Scanner::new(rules, vec![]);
+
+        // 請 is in the previous paragraph — should NOT fire.
+        let issues = scanner.scan("請看這裡\n\n調用方法").issues;
+        assert!(
+            issues.is_empty(),
+            "after: must not match across paragraph break: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn positional_before_stops_at_code_span() {
+        // In Markdown, before:函式 should NOT match text inside a code span.
+        let rules = vec![SpellingRule {
+            from: "調用".into(),
+            to: vec!["呼叫".into()],
+            rule_type: RuleType::CrossStrait,
+            disabled: false,
+            context: None,
+            english: None,
+            context_clues: None,
+            negative_context_clues: None,
+            exceptions: None,
+            positional_clues: Some(vec!["before:函式".into()]),
+            tags: None,
+        }];
+        let scanner = Scanner::new(rules, vec![]);
+
+        // 函式 is inside a code span — positional window should stop
+        // at the excluded range boundary, so the clue is invisible.
+        let md_text = "調用`函式`來處理";
+        let issues = scanner
+            .scan_for_content_type(md_text, ContentType::Markdown, Profile::Default)
+            .issues;
+        assert!(
+            issues.is_empty(),
+            "before: must not see text inside code spans: {issues:?}"
+        );
+
+        // Same text without code span — should fire.
+        let plain_text = "調用函式來處理";
+        let issues = scanner
+            .scan_for_content_type(plain_text, ContentType::Markdown, Profile::Default)
+            .issues;
+        assert_eq!(
+            issues.len(),
+            1,
+            "should fire when 函式 is not in code span: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn positional_adjacent_excluded_region() {
+        // adjacent:函式 should NOT match if 函式 is inside an excluded region.
+        let rules = vec![SpellingRule {
+            from: "調用".into(),
+            to: vec!["呼叫".into()],
+            rule_type: RuleType::CrossStrait,
+            disabled: false,
+            context: None,
+            english: None,
+            context_clues: None,
+            negative_context_clues: None,
+            exceptions: None,
+            positional_clues: Some(vec!["adjacent:函式".into()]),
+            tags: None,
+        }];
+        let scanner = Scanner::new(rules, vec![]);
+
+        // 函式 inside a code span (Markdown) — adjacent should not match.
+        let md_text = "調用`函式`";
+        let issues = scanner
+            .scan_for_content_type(md_text, ContentType::Markdown, Profile::Default)
+            .issues;
+        assert!(
+            issues.is_empty(),
+            "adjacent: must not match term inside excluded region: {issues:?}"
         );
     }
 

@@ -193,6 +193,7 @@ impl OverrideStore {
             exceptions: None,
             context_clues: None,
             negative_context_clues: None,
+            positional_clues: None,
             tags: None,
         };
         self.upsert_spelling_override(&rule)
@@ -1071,6 +1072,7 @@ mod tests {
                 exceptions: None,
                 context_clues: None,
                 negative_context_clues: None,
+                positional_clues: None,
                 tags: None,
             },
             SpellingRule {
@@ -1084,6 +1086,7 @@ mod tests {
                 exceptions: None,
                 context_clues: None,
                 negative_context_clues: None,
+                positional_clues: None,
                 tags: None,
             },
         ]
@@ -1130,6 +1133,7 @@ mod tests {
             exceptions: None,
             context_clues: None,
             negative_context_clues: None,
+            positional_clues: None,
             tags: None,
         };
         store.upsert_spelling_override(&override_rule).unwrap();
@@ -1151,6 +1155,7 @@ mod tests {
             exceptions: None,
             context_clues: None,
             negative_context_clues: None,
+            positional_clues: None,
             tags: None,
         };
         store.upsert_spelling_override(&new_rule).unwrap();
@@ -1233,6 +1238,7 @@ mod tests {
                 exceptions: None,
                 context_clues: None,
                 negative_context_clues: None,
+                positional_clues: None,
                 tags: None,
             };
             store.upsert_spelling_override(&rule).unwrap();
@@ -1266,6 +1272,7 @@ mod tests {
                 exceptions: None,
                 context_clues: None,
                 negative_context_clues: None,
+                positional_clues: None,
                 tags: None,
             }],
             case: vec![],

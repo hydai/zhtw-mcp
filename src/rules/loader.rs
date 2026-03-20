@@ -41,6 +41,7 @@ mod tests {
             exceptions: None,
             context_clues: None,
             negative_context_clues: None,
+            positional_clues: None,
             tags: None,
         }];
         let case_rules = vec![CaseRule {
@@ -68,6 +69,7 @@ mod tests {
             exceptions: None,
             context_clues: None,
             negative_context_clues: None,
+            positional_clues: None,
             tags: None,
         }];
         let rules_b = vec![SpellingRule {
@@ -81,6 +83,7 @@ mod tests {
             exceptions: None,
             context_clues: None,
             negative_context_clues: None,
+            positional_clues: None,
             tags: None,
         }];
         let case_rules: Vec<CaseRule> = vec![];

@@ -7240,9 +7240,9 @@
     },
     {
       "from": "調用",
-      "to": ["呼叫", "喚起"],
+      "to": ["呼叫"],
       "type": "cross_strait",
-      "context": "@domain 通訊",
+      "context": "@domain 通訊。cn 調用 = call/invoke；tw 用「呼叫」(程式)、「調閱」(法律)、「調派」(行政)",
       "english": "call/invoke"
     },
     {

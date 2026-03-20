@@ -20,7 +20,8 @@ use crate::engine::zhtype::ChineseType;
 use crate::rules::ruleset::{Issue, IssueType, ProfileConfig, RuleType};
 
 use super::{
-    already_correct_form, clamp_at_excluded, Scanner, CONTEXT_WINDOW_CHARS, MIN_SCAN_CLUE_MATCHES,
+    already_correct_form, clamp_at_excluded, PositionalClue, Scanner, CONTEXT_WINDOW_CHARS,
+    MIN_SCAN_CLUE_MATCHES, POSITIONAL_WINDOW_CHARS,
 };
 
 /// Pre-computed clue hit list: sorted by start byte offset.
@@ -256,6 +257,17 @@ impl Scanner {
             }
         }
 
+        // Positional clue gate: directional constraints on where context
+        // terms must appear relative to the match.  Checked after the flat
+        // context-clue gate (which confirms co-occurrence in +-40-char window).
+        // When both context_clues and positional_clues are present on a rule,
+        // both must pass (AND semantics).
+        if let Some(ref pos_clues) = self.rule_positional_clues[rule_idx] {
+            if !check_positional_clues(text, start, end, excluded, pos_clues) {
+                return;
+            }
+        }
+
         // AiFiller deletion rules: extend span to consume trailing fullwidth
         // punctuation (，：) so that a single base rule handles all variants
         // without leaving dangling punctuation after fix application.
@@ -434,4 +446,175 @@ fn count_clues_in_window(
         }
     }
     found
+}
+
+/// Check all positional clues for a match at [start, end) in `text`.
+///
+/// All positive clues (Before, After, Adjacent) must match (AND).
+/// Any negative clue (NotBefore, NotAfter) vetoes (short-circuit false).
+/// Returns true when all conditions are satisfied.
+///
+/// Window computation respects paragraph breaks and excluded ranges (code
+/// spans, URLs, inline suppressions) — same discipline as context_byte_window.
+fn check_positional_clues(
+    text: &str,
+    start: usize,
+    end: usize,
+    excluded: &[ByteRange],
+    clues: &[PositionalClue],
+) -> bool {
+    // Compute bounded windows once per direction, lazily.
+    // Positional windows are ~80 bytes max; the cost is trivial but
+    // caching avoids redundant paragraph-break + excluded-range scans
+    // when multiple clues share the same direction.
+    let mut after_win: Option<(usize, usize)> = None;
+    let mut before_win: Option<(usize, usize)> = None;
+
+    for clue in clues {
+        match clue {
+            PositionalClue::Before(term) => {
+                let (ws, we) =
+                    *after_win.get_or_insert_with(|| positional_bounds_after(text, end, excluded));
+                if !text[ws..we].contains(term.as_str()) {
+                    return false;
+                }
+            }
+            PositionalClue::After(term) => {
+                let (ws, we) = *before_win
+                    .get_or_insert_with(|| positional_bounds_before(text, start, excluded));
+                if !text[ws..we].contains(term.as_str()) {
+                    return false;
+                }
+            }
+            PositionalClue::Adjacent(term) => {
+                // Immediately before: term ends right at match start.
+                let before_ok = start >= term.len()
+                    && text.get(start - term.len()..start) == Some(term.as_str())
+                    && !is_excluded(start - term.len(), start, excluded);
+                // Immediately after: term starts right at match end.
+                let after_ok = text.get(end..end + term.len()) == Some(term.as_str())
+                    && !is_excluded(end, end + term.len(), excluded);
+                if !before_ok && !after_ok {
+                    return false;
+                }
+            }
+            PositionalClue::NotBefore(term) => {
+                let (ws, we) =
+                    *after_win.get_or_insert_with(|| positional_bounds_after(text, end, excluded));
+                if text[ws..we].contains(term.as_str()) {
+                    return false;
+                }
+            }
+            PositionalClue::NotAfter(term) => {
+                let (ws, we) = *before_win
+                    .get_or_insert_with(|| positional_bounds_before(text, start, excluded));
+                if text[ws..we].contains(term.as_str()) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Compute byte-offset bounds for the positional window AFTER the match
+/// ending at `match_end`.  Returns `(win_start, win_end)` spanning up to
+/// POSITIONAL_WINDOW_CHARS characters forward, clamped at paragraph breaks
+/// and excluded-range boundaries — same discipline as context_byte_window.
+fn positional_bounds_after(text: &str, match_end: usize, excluded: &[ByteRange]) -> (usize, usize) {
+    if match_end >= text.len() {
+        return (text.len(), text.len());
+    }
+    let bytes = text.as_bytes();
+
+    // Paragraph boundary: stop at first \n\n after match_end.
+    let max_search = POSITIONAL_WINDOW_CHARS * 4;
+    let search_end = (match_end + max_search).min(text.len());
+    let para_end = {
+        let search = &bytes[match_end..search_end];
+        find_first_paragraph_break(search).map_or(text.len(), |pos| match_end + pos)
+    };
+
+    // Walk forward POSITIONAL_WINDOW_CHARS chars, clamped at paragraph end.
+    let mut byte_end = match_end;
+    for _ in 0..POSITIONAL_WINDOW_CHARS {
+        if byte_end >= para_end {
+            byte_end = para_end;
+            break;
+        }
+        byte_end = text.ceil_char_boundary(byte_end + 1);
+    }
+    byte_end = byte_end.min(para_end);
+
+    // Clamp at the nearest excluded range that starts after match_end.
+    if !excluded.is_empty() {
+        let right_idx = excluded.partition_point(|r| r.start < match_end);
+        for excl in &excluded[right_idx..] {
+            if excl.start >= byte_end {
+                break;
+            }
+            if excl.start >= match_end && excl.start < byte_end {
+                byte_end = excl.start;
+            }
+        }
+    }
+
+    let byte_end = text.floor_char_boundary(byte_end.min(text.len()));
+    if match_end > byte_end {
+        return (match_end, match_end);
+    }
+    (match_end, byte_end)
+}
+
+/// Compute byte-offset bounds for the positional window BEFORE the match
+/// starting at `match_start`.  Returns `(win_start, win_end)` spanning up
+/// to POSITIONAL_WINDOW_CHARS characters backward, clamped at paragraph
+/// breaks and excluded-range boundaries.
+fn positional_bounds_before(
+    text: &str,
+    match_start: usize,
+    excluded: &[ByteRange],
+) -> (usize, usize) {
+    if match_start == 0 {
+        return (0, 0);
+    }
+    let bytes = text.as_bytes();
+
+    // Paragraph boundary: stop at last \n\n before match_start.
+    let max_search = POSITIONAL_WINDOW_CHARS * 4;
+    let search_start = match_start.saturating_sub(max_search);
+    let para_start = {
+        let search = &bytes[search_start..match_start];
+        find_last_paragraph_break(search).map_or(0, |pos| search_start + pos + 1)
+    };
+
+    // Walk backward POSITIONAL_WINDOW_CHARS chars, clamped at paragraph start.
+    let mut byte_start = match_start;
+    for _ in 0..POSITIONAL_WINDOW_CHARS {
+        if byte_start <= para_start {
+            byte_start = para_start;
+            break;
+        }
+        byte_start = text.floor_char_boundary(byte_start - 1);
+    }
+    byte_start = byte_start.max(para_start);
+
+    // Clamp at the nearest excluded range that ends before match_start.
+    if !excluded.is_empty() {
+        let left_idx = excluded.partition_point(|r| r.start < match_start);
+        for excl in excluded[..left_idx].iter().rev() {
+            if excl.end <= byte_start {
+                break;
+            }
+            if excl.end <= match_start && excl.end > byte_start {
+                byte_start = excl.end;
+            }
+        }
+    }
+
+    let byte_start = text.ceil_char_boundary(byte_start);
+    if byte_start > match_start {
+        return (match_start, match_start);
+    }
+    (byte_start, match_start)
 }

@@ -23,6 +23,7 @@ fn spelling(from: &str, to: &[&str]) -> SpellingRule {
         exceptions: None,
         context_clues: None,
         negative_context_clues: None,
+        positional_clues: None,
         tags: None,
     }
 }
@@ -38,6 +39,7 @@ fn variant(from: &str, to: &[&str]) -> SpellingRule {
         exceptions: None,
         context_clues: None,
         negative_context_clues: None,
+        positional_clues: None,
         tags: None,
     }
 }
@@ -899,6 +901,7 @@ fn ai_filler_rule(from: &str, to: &[&str]) -> SpellingRule {
         exceptions: None,
         context_clues: None,
         negative_context_clues: None,
+        positional_clues: None,
         tags: None,
     }
 }

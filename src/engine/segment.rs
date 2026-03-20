@@ -709,6 +709,7 @@ mod tests {
             exceptions: None,
             context_clues: None,
             negative_context_clues: None,
+            positional_clues: None,
             tags: None,
         }];
         let seg = Segmenter::from_rules(&rules);
@@ -844,6 +845,7 @@ mod tests {
             exceptions: None,
             context_clues: None,
             negative_context_clues: None,
+            positional_clues: None,
             tags: None,
         }];
         let seg = Segmenter::from_rules(&rules);
@@ -950,6 +952,7 @@ mod tests {
             exceptions: None,
             context_clues: None,
             negative_context_clues: None,
+            positional_clues: None,
             tags: None,
         }];
         let seg = Segmenter::from_rules(&rules);
@@ -978,6 +981,7 @@ mod tests {
             exceptions: None,
             context_clues: Some(vec!["分析".into(), "處理".into()]),
             negative_context_clues: None,
+            positional_clues: None,
             tags: None,
         }];
         let seg = Segmenter::from_rules(&rules);
@@ -1001,6 +1005,7 @@ mod tests {
             exceptions: None,
             context_clues: None,
             negative_context_clues: None,
+            positional_clues: None,
             tags: None,
         }];
         let seg = Segmenter::from_rules(&rules);
@@ -1031,6 +1036,7 @@ mod tests {
             exceptions: None,
             context_clues: None,
             negative_context_clues: None,
+            positional_clues: None,
             tags: None,
         }];
         let seg = Segmenter::from_rules(&rules);
