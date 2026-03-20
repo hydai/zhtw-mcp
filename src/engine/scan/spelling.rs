@@ -13,6 +13,8 @@
 // The clue AC uses MatchKind::Standard with overlapping iteration so that
 // substring clues (e.g. "下拉" inside "下拉菜單") are all captured.
 
+use std::collections::HashMap;
+
 use crate::engine::excluded::{is_excluded, ByteRange};
 use crate::engine::zhtype::ChineseType;
 use crate::rules::ruleset::{Issue, IssueType, ProfileConfig, RuleType};
@@ -77,6 +79,11 @@ impl Scanner {
         // binary search per match.
         let mut excl_cursor: usize = 0;
 
+        // Word-boundary straddle cache: memoizes word_straddles_boundary()
+        // results per byte offset.  Multiple AC matches can share boundary
+        // positions, and MMSEG trie traversal is the heaviest per-match check.
+        let mut boundary_cache: HashMap<usize, bool> = HashMap::new();
+
         // Dispatch to charwise AC when available; fall back to bytewise.
         if let Some(ref cw_ac) = self.spelling_ac_charwise {
             for mat in cw_ac.leftmost_find_iter(text) {
@@ -88,6 +95,7 @@ impl Scanner {
                     issues,
                     cfg,
                     &mut clue_hits_cache,
+                    &mut boundary_cache,
                     mat.start(),
                     mat.end(),
                     mat.value(),
@@ -103,6 +111,7 @@ impl Scanner {
                     issues,
                     cfg,
                     &mut clue_hits_cache,
+                    &mut boundary_cache,
                     mat.start(),
                     mat.end(),
                     mat.pattern().as_usize(),
@@ -124,6 +133,7 @@ impl Scanner {
         issues: &mut Vec<Issue>,
         cfg: &ProfileConfig,
         clue_hits_cache: &mut Option<ClueHits>,
+        boundary_cache: &mut HashMap<usize, bool>,
         start: usize,
         end: usize,
         rule_idx: usize,
@@ -179,10 +189,17 @@ impl Scanner {
         // the matched pattern spans two distinct words — e.g. "積分" found
         // inside "累積分佈" (累積 + 分佈), "程序" inside "排程序列"
         // (排程 + 序列), "導出" inside "引導出" (引導 + 出).
-        if self
-            .segmenter
-            .match_straddles_word_boundary(text, start, end)
-        {
+        //
+        // Results are memoized per byte offset: boundaries are text-fixed,
+        // not rule-dependent, and clustered/overlapping AC matches repeat
+        // lookups at the same positions.
+        let straddles_start = *boundary_cache
+            .entry(start)
+            .or_insert_with(|| self.segmenter.word_straddles_boundary(text, start));
+        let straddles_end = *boundary_cache
+            .entry(end)
+            .or_insert_with(|| self.segmenter.word_straddles_boundary(text, end));
+        if straddles_start || straddles_end {
             return;
         }
 
