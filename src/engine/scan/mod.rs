@@ -499,58 +499,33 @@ pub fn build_exclusions_for_content_type(text: &str, content_type: ContentType) 
 
 /// Compiled scanner, reusable across multiple scan calls.
 pub struct Scanner {
-    /// Charwise double-array Aho-Corasick automaton for spelling rules.
-    /// Uses Unicode code-point transitions instead of UTF-8 bytes, reducing
-    /// state count by ~3x for CJK patterns (12 bytes/state vs ~32-40).
-    /// Falls back to the bytewise automaton when charwise build fails
-    /// (e.g., duplicate patterns from user overrides).
+    /// Charwise double-array AC for spelling (primary; ~3x fewer states for CJK).
     spelling_ac_charwise: Option<daachorse::CharwiseDoubleArrayAhoCorasick<usize>>,
-    /// Bytewise Aho-Corasick fallback for spelling rules.  Built lazily
-    /// only when charwise AC is unavailable, saving memory and startup
-    /// time in the common case.
+    /// Bytewise AC fallback (built only when charwise is unavailable).
     spelling_ac_bytewise: Option<AhoCorasick>,
-    /// Parallel vec: one SpellingRule per pattern in the spelling automata.
     spelling_rules: Vec<SpellingRule>,
-    /// Precomputed suggestions for each spelling rule.  Avoids per-match
-    /// effective_suggestions() calls and their String allocations.
+    /// Precomputed suggestions per rule (avoids per-match allocation).
     spelling_suggestions: Vec<Vec<String>>,
 
-    /// Aho-Corasick automaton for case rules (built case-insensitively).
     case_ac: Option<AhoCorasick>,
-    /// Parallel vec: one CaseRule per pattern in case_ac.
     case_rules: Vec<CaseRule>,
 
-    /// MMSEG segmenter — retained for fixer context-clue checks and the
-    /// public `segmenter()` accessor.  No longer used in the scan hot path.
+    /// MMSEG segmenter for fixer context-clue checks and public accessor.
     segmenter: Segmenter,
 
-    // Context-clue scan infrastructure
-    //
-    // Instead of running MMSEG segmentation per spelling match to check
-    // context_clues, we keep a lightweight AC automaton built from all
-    // unique clue strings and run it only over the bounded local window for
-    // matches that actually need clue resolution.
-    /// Bytewise AC automaton built from all unique context-clue strings
-    /// (both positive and negative) across all spelling rules.  None when
-    /// no rules have context_clues or negative_context_clues.
+    /// Bytewise AC over all unique clue strings (positive + negative).
     clue_ac: Option<AhoCorasick>,
-    /// Per spelling-rule index: which clue_string indices are positive clues.
-    /// None when the rule has no context_clues.
+    /// Per-rule positive clue IDs into the clue AC pattern list.
     rule_pos_clue_ids: Vec<Option<Vec<u16>>>,
-    /// Per spelling-rule index: which clue_string indices are negative clues.
-    /// None when the rule has no negative_context_clues.
+    /// Per-rule negative clue IDs into the clue AC pattern list.
     rule_neg_clue_ids: Vec<Option<Vec<u16>>>,
-    /// Per spelling-rule index: true when `rule.from` appears as a substring
-    /// of any `rule.to` entry.  When false, `already_correct_form()` is
-    /// guaranteed to return false and can be skipped entirely.
-    spelling_has_superstring: Vec<bool>,
-    /// Per spelling-rule index: parsed positional clues.  None when the rule
-    /// has no positional_clues.  Checked after context-clue gate passes.
+    /// Per-rule parsed positional clues (checked after context-clue gate).
     rule_positional_clues: Vec<Option<Vec<PositionalClue>>>,
-    /// Absorption patterns injected into the spelling AC at build time.
-    /// Retained so force_bytewise() can rebuild with the same pattern set.
+    /// Absorption patterns retained for force_bytewise() rebuild.
     #[cfg_attr(not(test), allow(dead_code))]
     absorber_strings: Vec<String>,
+    /// Per-rule bitflags gating optional filter stages (spelling::FILTER_*).
+    rule_filter_flags: Vec<u8>,
 }
 
 impl Scanner {
@@ -565,16 +540,11 @@ impl Scanner {
     /// case folding). The case automaton is ASCII-case-insensitive so it
     /// catches e.g. "javascript" when the canonical form is "JavaScript".
     pub fn new(spelling_rules: Vec<SpellingRule>, case_rules: Vec<CaseRule>) -> Self {
-        // Strip disabled rules before building any automata.  This ensures
-        // the disabled flag in the embedded ruleset (or user overrides)
-        // is always respected, regardless of whether the caller pre-filtered.
         let mut spelling_rules: Vec<SpellingRule> =
             spelling_rules.into_iter().filter(|r| !r.disabled).collect();
         let case_rules: Vec<CaseRule> = case_rules.into_iter().filter(|r| !r.disabled).collect();
 
-        // Deduplicate spelling patterns by from key.  User overrides can
-        // introduce duplicates, and daachorse rejects them outright.  Keep
-        // the last occurrence (overrides appear after embedded rules).
+        // Deduplicate by `from` key (last wins; overrides come after embedded).
         {
             let mut seen = std::collections::HashSet::new();
             let mut i = spelling_rules.len();
@@ -586,8 +556,7 @@ impl Scanner {
             }
         }
 
-        // Pre-deduplicate context_clues and negative_context_clues in each
-        // rule.  Eliminates per-match HashSet allocations in the hot path.
+        // Deduplicate context clues within each rule.
         for rule in &mut spelling_rules {
             if let Some(ref mut clues) = rule.context_clues {
                 let mut seen = std::collections::HashSet::new();
@@ -599,29 +568,13 @@ impl Scanner {
             }
         }
 
-        // Precompute effective suggestions for each rule to avoid per-match
-        // String allocations in the scan hot path.
         let spelling_suggestions: Vec<Vec<String>> =
             spelling_rules.iter().map(effective_suggestions).collect();
 
-        // Precompute superstring flag: true when `from` appears as a
-        // substring of any `to` entry, meaning the surrounding text might
-        // already contain the correct form (e.g. from:"算法" in to:"演算法").
-        // ~93% of rules have no superstring relationship, so this flag
-        // lets the hot path skip `already_correct_form()` entirely.
-        let spelling_has_superstring: Vec<bool> = spelling_rules
-            .iter()
-            .map(|r| r.to.iter().any(|t| t.contains(&r.from)))
-            .collect();
-
         let segmenter = Segmenter::from_rules(&spelling_rules);
 
-        // Build context-clue pre-scan AC
-        //
-        // Collect all unique clue strings (positive + negative) into a deduped
-        // vec.  Build a bytewise AC (clue set is small, ~200-400 patterns, so
-        // bytewise is fine and gives byte offsets directly).  Map each rule's
-        // clue lists to indices in the deduped vec.
+        // Build clue AC: intern all unique clue strings, map per-rule clue
+        // lists to indices, build a bytewise AC for windowed lookups.
         let (clue_ac, rule_pos_clue_ids, rule_neg_clue_ids) = {
             let mut clue_map: std::collections::HashMap<String, u16> =
                 std::collections::HashMap::new();
@@ -649,10 +602,13 @@ impl Scanner {
                         Some(clues.iter().map(&mut intern_clue).collect())
                     }
                 });
-                let neg = rule
-                    .negative_context_clues
-                    .as_ref()
-                    .map(|clues| clues.iter().map(&mut intern_clue).collect());
+                let neg = rule.negative_context_clues.as_ref().and_then(|clues| {
+                    if clues.is_empty() {
+                        None
+                    } else {
+                        Some(clues.iter().map(&mut intern_clue).collect())
+                    }
+                });
                 pos_ids.push(pos);
                 neg_ids.push(neg);
             }
@@ -675,8 +631,7 @@ impl Scanner {
             (ac, pos_ids, neg_ids)
         };
 
-        // Validate clue-ID counts fit the fixed bitset in count_clues_in_window
-        // (capacity 32).  Fires at startup, not per-match.
+        // Validate clue-ID counts fit the fixed bitset (capacity 32).
         for (i, pos) in rule_pos_clue_ids.iter().enumerate() {
             if let Some(ids) = pos {
                 assert!(
@@ -698,8 +653,6 @@ impl Scanner {
             }
         }
 
-        // Parse positional clues from raw strings into structured form.
-        // Invalid syntax is logged and skipped (fail-open).
         let rule_positional_clues: Vec<Option<Vec<PositionalClue>>> = spelling_rules
             .iter()
             .map(|rule| {
@@ -729,23 +682,11 @@ impl Scanner {
         let spelling_patterns: Vec<&str> = spelling_rules.iter().map(|r| r.from.as_str()).collect();
 
         // Absorption patterns: exception phrases and superstring `to` forms
-        // that contain `from` as a substring.  Injected into the spelling AC
-        // so that LeftmostLongest semantics prefer the longer pattern,
-        // suppressing the shorter `from` match at zero per-match cost.
-        //
-        // Safety checks (both at build time, zero runtime cost):
-        //   1. Exact collision: skip absorbers that match an existing `from`
-        //      entry — they would shadow a real rule entirely.
-        //   2. Substring collision: skip absorbers that contain a DIFFERENT
-        //      rule's `from` as a substring — LeftmostLongest would swallow
-        //      the unrelated rule's match when the absorber fires.
-        //
-        // Absorption sentinels use indices >= spelling_rules.len() so
-        // process_spelling_match can reject them with a single bounds check.
+        // injected into the AC so LeftmostLongest suppresses shorter `from`
+        // matches.  Indices >= spelling_rules.len() act as sentinels.
         let absorber_strings: Vec<String> = {
             let from_set: std::collections::HashSet<&str> =
                 spelling_patterns.iter().copied().collect();
-            // Candidate absorbers that pass the exact-collision check.
             let mut candidates: Vec<(String, &str)> = Vec::new();
             let mut dedup = std::collections::HashSet::new();
             for rule in &spelling_rules {
@@ -769,14 +710,7 @@ impl Scanner {
                     }
                 }
             }
-            // Overlap-collision filter: reject absorbers that would shadow
-            // any `from` pattern OTHER than the originating rule's `from`.
-            // LeftmostLongest suppresses any match starting inside the
-            // absorber, so we must check two cases:
-            //   1. Containment: `from` is a substring of the absorber.
-            //   2. Right-boundary overlap: a proper suffix of the absorber
-            //      is a prefix of `from` (the match starts inside the
-            //      absorber but extends beyond it).
+            // Reject absorbers that would shadow a different rule's `from`.
             candidates
                 .into_iter()
                 .filter(|(absorber, orig_from)| {
@@ -784,12 +718,11 @@ impl Scanner {
                         if f == *orig_from {
                             return false;
                         }
-                        // Case 1: full containment
                         if absorber.contains(f) {
                             return true;
                         }
-                        // Case 2: right-boundary overlap — any proper suffix
-                        // of the absorber is a prefix of f
+                        // Right-boundary overlap: proper suffix of absorber
+                        // is a prefix of f.
                         let mut chars = absorber.char_indices();
                         chars.next(); // skip position 0 (full string)
                         for (byte_idx, _) in chars {
@@ -810,15 +743,6 @@ impl Scanner {
             .chain(absorber_strings.iter().map(|s| s.as_str()))
             .collect();
 
-        // Build charwise double-array AC for spelling (daachorse).
-        // Charwise transitions use Unicode code points instead of UTF-8
-        // bytes, reducing state count by ~3x for CJK-dominant patterns.
-        // The double-array representation uses only 12 bytes per state
-        // (vs ~32-40 for BurntSushi's contiguous NFA).
-        //
-        // Patterns are indexed by position (usize) so the match value
-        // maps directly to the parallel spelling_rules vec.  Absorption
-        // patterns occupy indices >= spelling_rules.len().
         let spelling_ac_charwise = {
             let patvals: Vec<(&str, usize)> = all_patterns
                 .iter()
@@ -837,8 +761,6 @@ impl Scanner {
             }
         };
 
-        // Bytewise fallback: built lazily only when charwise is unavailable.
-        // Saves memory and ~1ms startup time in the common case.
         let spelling_ac_bytewise = if spelling_ac_charwise.is_none() {
             match AhoCorasickBuilder::new()
                 .match_kind(MatchKind::LeftmostLongest)
@@ -868,6 +790,33 @@ impl Scanner {
             }
         };
 
+        let rule_filter_flags: Vec<u8> = spelling_rules
+            .iter()
+            .enumerate()
+            .map(|(i, rule)| {
+                let mut f: u8 = 0;
+                if rule.to.iter().any(|t| t.contains(&rule.from)) {
+                    f |= spelling::FILTER_HAS_SUPERSTRING;
+                }
+                if rule.exceptions.as_ref().is_some_and(|v| !v.is_empty()) {
+                    f |= spelling::FILTER_HAS_EXCEPTIONS;
+                }
+                if rule_pos_clue_ids[i].is_some() {
+                    f |= spelling::FILTER_HAS_POS_CLUES;
+                }
+                if rule_neg_clue_ids[i].is_some() {
+                    f |= spelling::FILTER_HAS_NEG_CLUES;
+                }
+                if rule_positional_clues[i].is_some() {
+                    f |= spelling::FILTER_HAS_POSITIONAL;
+                }
+                if rule.is_deletion_rule() {
+                    f |= spelling::FILTER_IS_DELETION;
+                }
+                f
+            })
+            .collect();
+
         Self {
             spelling_ac_charwise,
             spelling_ac_bytewise,
@@ -879,9 +828,9 @@ impl Scanner {
             clue_ac,
             rule_pos_clue_ids,
             rule_neg_clue_ids,
-            spelling_has_superstring,
             rule_positional_clues,
             absorber_strings,
+            rule_filter_flags,
         }
     }
 
