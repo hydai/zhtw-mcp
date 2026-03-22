@@ -4,11 +4,11 @@
 // transitions reduce state count ~3x for CJK patterns).  Falls back to
 // BurntSushi's bytewise Aho-Corasick otherwise.
 //
-// Context-clue checking uses a pre-scan approach: a separate bytewise AC
+// Context-clue checking uses a windowed approach: a separate bytewise AC
 // automaton (built from all unique context_clue and negative_context_clue
-// strings) is run once over the full text before the spelling scan.  Each
-// spelling match then checks clue presence via O(log H) binary search in
-// the pre-scan hit list, eliminating per-match MMSEG segmentation.
+// strings) is run only over the bounded context slice for matches that
+// actually need clue resolution.  This avoids the old full-document pre-scan
+// and its document-sized allocation on the first clue-gated match.
 //
 // The clue AC uses MatchKind::Standard with overlapping iteration so that
 // substring clues (e.g. "下拉" inside "下拉菜單") are all captured.
@@ -24,34 +24,7 @@ use super::{
     MIN_SCAN_CLUE_MATCHES, POSITIONAL_WINDOW_CHARS,
 };
 
-/// Pre-computed clue hit list: sorted by start byte offset.
-/// Each entry is (start_byte, end_byte, clue_string_index).
-type ClueHits = Vec<(usize, usize, u16)>;
-
 impl Scanner {
-    /// Pre-scan text for all context-clue strings, filtering out hits inside
-    /// excluded ranges.  Returns a sorted list of (start, end, clue_index).
-    ///
-    /// Uses overlapping iteration so that substring clues (e.g. "下拉" within
-    /// "下拉菜單") are all captured — LeftmostLongest non-overlapping iteration
-    /// would swallow the shorter match.
-    fn build_clue_hits(&self, text: &str, excluded: &[ByteRange]) -> ClueHits {
-        let Some(ref clue_ac) = self.clue_ac else {
-            return Vec::new();
-        };
-        let mut hits: ClueHits = Vec::new();
-        for mat in clue_ac.find_overlapping_iter(text) {
-            if is_excluded(mat.start(), mat.end(), excluded) {
-                continue;
-            }
-            hits.push((mat.start(), mat.end(), mat.pattern().as_usize() as u16));
-        }
-        // Overlapping iterator yields matches ordered by end position;
-        // re-sort by start offset for binary-search proximity checks.
-        hits.sort_unstable_by_key(|&(start, _, _)| start);
-        hits
-    }
-
     /// Spelling rule scan using Aho-Corasick.
     ///
     /// Uses charwise double-array AC (daachorse) when available for ~3x fewer
@@ -69,11 +42,6 @@ impl Scanner {
         issues: &mut Vec<Issue>,
         cfg: &ProfileConfig,
     ) {
-        // Lazy clue pre-scan: defer the O(n) clue AC pass until a matched
-        // rule actually needs context-clue checking.  Only ~7% of rules
-        // have context_clues, so most matches skip the clue AC entirely.
-        let mut clue_hits_cache: Option<ClueHits> = None;
-
         // Exclusion cursor: both AC iterators yield matches in increasing
         // start order, so we advance a cursor through the sorted excluded
         // ranges for amortized O(1) exclusion checks instead of O(log E)
@@ -95,7 +63,6 @@ impl Scanner {
                     zh_type,
                     issues,
                     cfg,
-                    &mut clue_hits_cache,
                     &mut boundary_cache,
                     mat.start(),
                     mat.end(),
@@ -111,7 +78,6 @@ impl Scanner {
                     zh_type,
                     issues,
                     cfg,
-                    &mut clue_hits_cache,
                     &mut boundary_cache,
                     mat.start(),
                     mat.end(),
@@ -133,12 +99,17 @@ impl Scanner {
         zh_type: ChineseType,
         issues: &mut Vec<Issue>,
         cfg: &ProfileConfig,
-        clue_hits_cache: &mut Option<ClueHits>,
         boundary_cache: &mut HashMap<usize, bool>,
         start: usize,
         end: usize,
         rule_idx: usize,
     ) {
+        // Absorption sentinel: exception/superstring patterns injected into
+        // the AC to shadow shorter `from` matches via LeftmostLongest.
+        if rule_idx >= self.spelling_rules.len() {
+            return;
+        }
+
         let rule = &self.spelling_rules[rule_idx];
 
         // Variant rules are character-form corrections (裏→裡, 着→著) that
@@ -225,35 +196,31 @@ impl Scanner {
             }
         }
 
-        // Context-clue gate via pre-scan hits.
+        // Context-clue gate via a windowed clue AC scan.
         //
-        // The clue AC pass is deferred until a matched rule actually needs
-        // context-clue checking (~7% of rules).  This avoids the O(n) clue
-        // AC scan entirely for the 93% of matches that never check clues.
+        // Only rules with context clues pay this cost, and the automaton runs
+        // over the bounded local window rather than the full document.
         let has_pos = self.rule_pos_clue_ids[rule_idx].is_some();
         let has_neg = self.rule_neg_clue_ids[rule_idx].is_some();
 
         if has_pos || has_neg {
-            let clue_hits =
-                clue_hits_cache.get_or_insert_with(|| self.build_clue_hits(text, excluded));
-
             // Compute byte-offset window matching surrounding_window_bounded
             // semantics: +-CONTEXT_WINDOW_CHARS characters, clamped at excluded
             // range boundaries.
             let (win_start, win_end) = context_byte_window(text, start, end, excluded);
+            let (pos_matches, any_neg) = scan_clues_in_window(
+                self.clue_ac.as_ref(),
+                &text[win_start..win_end],
+                self.rule_pos_clue_ids[rule_idx].as_deref(),
+                self.rule_neg_clue_ids[rule_idx].as_deref(),
+            );
 
-            if let Some(ref pos_ids) = self.rule_pos_clue_ids[rule_idx] {
-                let matches = count_clues_in_window(clue_hits, pos_ids, win_start, win_end);
-                if matches < MIN_SCAN_CLUE_MATCHES {
-                    return;
-                }
+            if has_pos && pos_matches < MIN_SCAN_CLUE_MATCHES {
+                return;
             }
 
-            if let Some(ref neg_ids) = self.rule_neg_clue_ids[rule_idx] {
-                let any_neg = count_clues_in_window(clue_hits, neg_ids, win_start, win_end);
-                if any_neg > 0 {
-                    return;
-                }
+            if has_neg && any_neg {
+                return;
             }
         }
 
@@ -403,49 +370,64 @@ fn find_first_paragraph_break(bytes: &[u8]) -> Option<usize> {
     None
 }
 
-/// Count how many distinct clue IDs from `needle_ids` appear in `clue_hits`
-/// fully within the byte window [win_start, win_end).
+/// Scan a bounded text window for positive and negative clue IDs in one pass.
 ///
-/// A clue hit is "within" the window only if both its start and end offsets
-/// fall inside [win_start, win_end) — this prevents clues that start inside
-/// the window but bleed past the right boundary from being counted.
-///
-/// Uses binary search to skip to the window start, then a single linear scan
-/// over the window hits.  Each hit's clue ID is checked against needle_ids
-/// via linear search (needle_ids is typically 3-8 entries).
-/// Complexity: O(log H + window_hits * C) where C is small and constant.
-fn count_clues_in_window(
-    clue_hits: &ClueHits,
-    needle_ids: &[u16],
-    win_start: usize,
-    win_end: usize,
-) -> usize {
-    if clue_hits.is_empty() || needle_ids.is_empty() {
-        return 0;
+/// Returns `(positive_matches, any_negative_match)`, counting each positive
+/// clue ID at most once even if it appears multiple times in the window.
+fn scan_clues_in_window(
+    clue_ac: Option<&aho_corasick::AhoCorasick>,
+    window: &str,
+    pos_ids: Option<&[u16]>,
+    neg_ids: Option<&[u16]>,
+) -> (usize, bool) {
+    let Some(clue_ac) = clue_ac else {
+        return (0, false);
+    };
+    if window.is_empty() || (pos_ids.is_none() && neg_ids.is_none()) {
+        return (0, false);
     }
-    // Binary search to the first hit at or after win_start.
-    let lo = clue_hits.partition_point(|&(off, _, _)| off < win_start);
-    // Single pass over window hits, tracking which needle IDs we have seen.
-    // needle_ids is small (typically 3-8, max ~21 for rules like "程序"),
-    // so a fixed-size bitset is faster than a HashSet.  Capacity validated
-    // at Scanner::new() time (max_clue_ids_per_rule <= 32).
-    let mut found = 0usize;
-    let mut seen = [false; 32];
-    for &(off, end, cid) in &clue_hits[lo..] {
-        if off >= win_end {
-            break;
-        }
-        if end > win_end {
-            continue;
-        }
-        if let Some(pos) = needle_ids.iter().position(|&nid| nid == cid) {
-            if !seen[pos] {
-                seen[pos] = true;
-                found += 1;
+
+    // Rule-local clue lists are small, so fixed bitsets beat HashSet
+    // allocation in the per-match hot path.
+    let mut pos_seen = [false; 32];
+    let mut pos_found = 0usize;
+    let mut any_neg = false;
+
+    for mat in clue_ac.find_overlapping_iter(window) {
+        let clue_id = mat.pattern().as_usize() as u16;
+
+        if let Some(pos_ids) = pos_ids {
+            if let Some(pos) = pos_ids.iter().position(|&id| id == clue_id) {
+                if !pos_seen[pos] {
+                    pos_seen[pos] = true;
+                    pos_found += 1;
+                }
             }
         }
+
+        if let Some(neg_ids) = neg_ids {
+            if neg_ids.contains(&clue_id) {
+                any_neg = true;
+            }
+        }
+
+        // Early exit: a negative hit irrevocably vetoes the rule, so
+        // stop immediately — no point counting more positives.
+        // Otherwise, break once all distinct positive IDs are found and
+        // there are no negative clues left to discover.
+        if any_neg {
+            break;
+        }
+        let pos_done = match pos_ids {
+            Some(ids) => pos_found >= ids.len(),
+            None => true,
+        };
+        if pos_done && neg_ids.is_none() {
+            break;
+        }
     }
-    found
+
+    (pos_found, any_neg)
 }
 
 /// Check all positional clues for a match at [start, end) in `text`.

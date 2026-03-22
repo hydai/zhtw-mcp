@@ -524,13 +524,12 @@ pub struct Scanner {
     /// public `segmenter()` accessor.  No longer used in the scan hot path.
     segmenter: Segmenter,
 
-    // Context-clue pre-scan infrastructure
+    // Context-clue scan infrastructure
     //
     // Instead of running MMSEG segmentation per spelling match to check
-    // context_clues, we pre-scan the full text once with a lightweight AC
-    // automaton built from all unique clue strings.  Per-match checks then
-    // become O(log H) binary-search proximity lookups (H = total clue hits)
-    // instead of O(W × L³) MMSEG segmentation per window.
+    // context_clues, we keep a lightweight AC automaton built from all
+    // unique clue strings and run it only over the bounded local window for
+    // matches that actually need clue resolution.
     /// Bytewise AC automaton built from all unique context-clue strings
     /// (both positive and negative) across all spelling rules.  None when
     /// no rules have context_clues or negative_context_clues.
@@ -548,6 +547,10 @@ pub struct Scanner {
     /// Per spelling-rule index: parsed positional clues.  None when the rule
     /// has no positional_clues.  Checked after context-clue gate passes.
     rule_positional_clues: Vec<Option<Vec<PositionalClue>>>,
+    /// Absorption patterns injected into the spelling AC at build time.
+    /// Retained so force_bytewise() can rebuild with the same pattern set.
+    #[cfg_attr(not(test), allow(dead_code))]
+    absorber_strings: Vec<String>,
 }
 
 impl Scanner {
@@ -725,6 +728,88 @@ impl Scanner {
 
         let spelling_patterns: Vec<&str> = spelling_rules.iter().map(|r| r.from.as_str()).collect();
 
+        // Absorption patterns: exception phrases and superstring `to` forms
+        // that contain `from` as a substring.  Injected into the spelling AC
+        // so that LeftmostLongest semantics prefer the longer pattern,
+        // suppressing the shorter `from` match at zero per-match cost.
+        //
+        // Safety checks (both at build time, zero runtime cost):
+        //   1. Exact collision: skip absorbers that match an existing `from`
+        //      entry — they would shadow a real rule entirely.
+        //   2. Substring collision: skip absorbers that contain a DIFFERENT
+        //      rule's `from` as a substring — LeftmostLongest would swallow
+        //      the unrelated rule's match when the absorber fires.
+        //
+        // Absorption sentinels use indices >= spelling_rules.len() so
+        // process_spelling_match can reject them with a single bounds check.
+        let absorber_strings: Vec<String> = {
+            let from_set: std::collections::HashSet<&str> =
+                spelling_patterns.iter().copied().collect();
+            // Candidate absorbers that pass the exact-collision check.
+            let mut candidates: Vec<(String, &str)> = Vec::new();
+            let mut dedup = std::collections::HashSet::new();
+            for rule in &spelling_rules {
+                if let Some(ref exceptions) = rule.exceptions {
+                    for exc in exceptions {
+                        if exc.contains(&rule.from)
+                            && !from_set.contains(exc.as_str())
+                            && dedup.insert(exc.clone())
+                        {
+                            candidates.push((exc.clone(), rule.from.as_str()));
+                        }
+                    }
+                }
+                for to in &rule.to {
+                    if to.contains(&rule.from)
+                        && to != &rule.from
+                        && !from_set.contains(to.as_str())
+                        && dedup.insert(to.clone())
+                    {
+                        candidates.push((to.clone(), rule.from.as_str()));
+                    }
+                }
+            }
+            // Overlap-collision filter: reject absorbers that would shadow
+            // any `from` pattern OTHER than the originating rule's `from`.
+            // LeftmostLongest suppresses any match starting inside the
+            // absorber, so we must check two cases:
+            //   1. Containment: `from` is a substring of the absorber.
+            //   2. Right-boundary overlap: a proper suffix of the absorber
+            //      is a prefix of `from` (the match starts inside the
+            //      absorber but extends beyond it).
+            candidates
+                .into_iter()
+                .filter(|(absorber, orig_from)| {
+                    !spelling_patterns.iter().any(|&f| {
+                        if f == *orig_from {
+                            return false;
+                        }
+                        // Case 1: full containment
+                        if absorber.contains(f) {
+                            return true;
+                        }
+                        // Case 2: right-boundary overlap — any proper suffix
+                        // of the absorber is a prefix of f
+                        let mut chars = absorber.char_indices();
+                        chars.next(); // skip position 0 (full string)
+                        for (byte_idx, _) in chars {
+                            let suffix = &absorber[byte_idx..];
+                            if f.starts_with(suffix) {
+                                return true;
+                            }
+                        }
+                        false
+                    })
+                })
+                .map(|(s, _)| s)
+                .collect()
+        };
+        let all_patterns: Vec<&str> = spelling_patterns
+            .iter()
+            .copied()
+            .chain(absorber_strings.iter().map(|s| s.as_str()))
+            .collect();
+
         // Build charwise double-array AC for spelling (daachorse).
         // Charwise transitions use Unicode code points instead of UTF-8
         // bytes, reducing state count by ~3x for CJK-dominant patterns.
@@ -732,9 +817,10 @@ impl Scanner {
         // (vs ~32-40 for BurntSushi's contiguous NFA).
         //
         // Patterns are indexed by position (usize) so the match value
-        // maps directly to the parallel spelling_rules vec.
+        // maps directly to the parallel spelling_rules vec.  Absorption
+        // patterns occupy indices >= spelling_rules.len().
         let spelling_ac_charwise = {
-            let patvals: Vec<(&str, usize)> = spelling_patterns
+            let patvals: Vec<(&str, usize)> = all_patterns
                 .iter()
                 .enumerate()
                 .map(|(i, &p)| (p, i))
@@ -756,7 +842,7 @@ impl Scanner {
         let spelling_ac_bytewise = if spelling_ac_charwise.is_none() {
             match AhoCorasickBuilder::new()
                 .match_kind(MatchKind::LeftmostLongest)
-                .build(&spelling_patterns)
+                .build(&all_patterns)
             {
                 Ok(ac) => Some(ac),
                 Err(e) => {
@@ -795,6 +881,7 @@ impl Scanner {
             rule_neg_clue_ids,
             spelling_has_superstring,
             rule_positional_clues,
+            absorber_strings,
         }
     }
 
@@ -812,6 +899,7 @@ impl Scanner {
                 .spelling_rules
                 .iter()
                 .map(|r| r.from.as_str())
+                .chain(self.absorber_strings.iter().map(|s| s.as_str()))
                 .collect();
             self.spelling_ac_bytewise = Some(
                 AhoCorasickBuilder::new()

@@ -7,7 +7,7 @@
 
 use std::borrow::Cow;
 
-use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::{IsNormalized, UnicodeNormalization};
 
 /// Result of NFC normalization with offset mapping.
 pub struct Normalized<'a> {
@@ -29,12 +29,24 @@ pub struct Normalized<'a> {
 /// maps to itself). When normalization changes character boundaries, the
 /// mapping tracks how each normalized byte relates to the original.
 pub fn normalize_nfc(input: &str) -> Normalized<'_> {
-    // Fast path: if already NFC, borrow directly with empty offset_map sentinel.
-    if unicode_normalization::is_nfc(input) {
-        return Normalized {
-            text: Cow::Borrowed(input),
-            offset_map: Vec::new(),
-        };
+    // Fast path: quick-check first so common clean zh-TW input avoids the
+    // full normalization walk and any allocation.  Fall back to the exact
+    // check only for the indeterminate Maybe case; skip it entirely when
+    // the answer is already definitive (Yes or No).
+    match unicode_normalization::is_nfc_quick(input.chars()) {
+        IsNormalized::Yes => {
+            return Normalized {
+                text: Cow::Borrowed(input),
+                offset_map: Vec::new(),
+            };
+        }
+        IsNormalized::Maybe if unicode_normalization::is_nfc(input) => {
+            return Normalized {
+                text: Cow::Borrowed(input),
+                offset_map: Vec::new(),
+            };
+        }
+        _ => {} // No or Maybe-and-not-NFC: proceed to normalize below
     }
 
     // Normalize the full string at once (NFC requires seeing combining
