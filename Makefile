@@ -38,7 +38,10 @@ indent: $(S2T_DATA)
 	python3 scripts/check-ruleset.py --lint
 	black scripts/*.py
 
-.PHONY: all clean distclean check check-size indent install uninstall status
+corpus: $(S2T_DATA)
+	cargo test --test corpus-evaluation -- --nocapture
+
+.PHONY: all clean distclean check check-size corpus indent install uninstall status
 
 install: all
 	@./scripts/deploy.sh install
