@@ -29,17 +29,41 @@ The scanner detects Traditional vs. Simplified Chinese by counting exclusive cha
 - Built-in SC→TC converter (`s2t.rs` + `s2t_data.rs`) eliminates the OpenCC runtime dependency for the `convert` subcommand.
 - Anchor calibration (`translate.rs`) annotates ambiguous issues with `anchor_match: Option<bool>` (confirmed/unconfirmed/no-signal) via synonym table and LCP stem matching. Fails open on API error (severity preserved).
 
+## Corpus evaluation
+
+Synthetic corpus fixtures in `tests/corpus/` drive aggregate quality metrics.
+
+- `ai-generated.json`: zh-TW technical prose with LLM-style filler and zh-CN drift.
+- `native-zh-tw.json`: clean native-style zh-TW technical prose used for false-positive checks.
+- `cn-to-tw-conversion.json`: zh-CN technical prose evaluated after built-in SC->TC conversion.
+
+The corpora are synthetic and repeat short seed documents enough times to exceed 50 KiB per corpus during evaluation. The test harness (`tests/corpus-evaluation.rs`) treats each seed as an independent document, weighted by its `repeat` count.
+
+Metric definitions:
+
+- `precision`: true-positive issue matches / all reported issues on corpora with gold positives.
+- `recall`: true-positive issue matches / all gold issues on corpora with gold positives.
+- `false_positive_rate`: fraction of native zh-TW documents that produced one or more issues.
+- `safe_fix_success_rate`: fraction of documents whose `lexical_safe` output exactly matches the expected fixed text.
+
+Gate thresholds: precision >= 90%, false-positive rate <= 5% on native zh-TW, safe-fix success >= 85% on AI-generated corpus.
+
+`expected_issues` and `expected_fixed` are intentionally independent: `expected_issues` lists all scanner detections (precision/recall), while `expected_fixed` reflects `LexicalSafe` fixer output (safe-fix rate). Confusable rules and clue-gated cross_strait rules are flagged by the scanner but skipped by the fixer, so some issues appear in `expected_issues` without a corresponding replacement in `expected_fixed`.
+
+Run `make corpus` to print the metrics table locally.
+
 ## Testing
 
 ```bash
 cargo test                             # all tests
 cargo test engine::scan                # specific module
-cargo test --test scanner_integration  # integration tests (scanner behavior)
-cargo test --test e2e_mcp              # E2E: JSON-RPC round-trip
-cargo test --test vocabulary_expansion # political nouns, IT terms, context clues
-cargo test --test cli_lint             # CLI: exit codes, formats, fix, SARIF, baseline
-cargo test --test anchor_benchmark -- --ignored  # anchor calibration (requires network)
-cargo test --test fix_tier_benchmark   # fix tier coverage
+cargo test --test scanner-integration  # integration tests (scanner behavior)
+cargo test --test e2e-mcp              # E2E: JSON-RPC round-trip
+cargo test --test vocabulary-expansion # political nouns, IT terms, context clues
+cargo test --test cli-lint             # CLI: exit codes, formats, fix, SARIF, baseline
+cargo test --test anchor-benchmark -- --ignored  # anchor calibration (requires network)
+cargo test --test fix-tier-benchmark   # fix tier coverage
+cargo test corpus -- --nocapture       # corpus evaluation suite
 cargo clippy                           # must be warning-free
 cargo fmt --check
 ```
